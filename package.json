@@ -1,15 +1,14 @@
 {
-  "name": "hashonline",
+  "name": "hash-online",
   "private": true,
-  "version": "1.4.0",
-  "description": "Hash Online · веб-портал движка Ха-кэш — автономный браузерный клиент",
-  "type": "commonjs",
+  "version": "1.0.0",
+  "type": "module",
   "scripts": {
-    "dev": "node dev-server.js",
-    "start": "echo 'static site - no server needed' && exit 0",
-    "test": "node tests/run-tests.js"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
-  "engines": {
-    "node": ">=18"
+  "devDependencies": {
+    "vite": "^5.0.0"
   }
 }
