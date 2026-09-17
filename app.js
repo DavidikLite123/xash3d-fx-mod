@@ -13,16 +13,7 @@
    ════════════════════════════════════════════════════════════════ */
 'use strict';
 
-(() => {
-
-  /* ── утилиты ────────────────────────────────────────────────── */
-  const $  = (sel, root) => (root || document).querySelector(sel);
-  const html = (markup) => {
-    const t = document.createElement('template');
-    t.innerHTML = markup.trim();
-    return t.content.firstElementChild;
-  };
-
+/* ── чистые функции (используются и в браузере, и в Node-тестах) ── */
   const plural = (n, [one, few, many]) => {
     const m = n % 100, d = n % 10;
     if (m > 10 && m < 20) return many;
@@ -44,6 +35,94 @@
   }[c]));
 
   /* ── конфигурация платформ ──────────────────────────────────── */
+
+  const JUNK_BASENAMES = new Set(['.ds_store', 'thumbs.db', 'desktop.ini']);
+  const isJunkPath = (name) => {
+    const segs = String(name).split('/');
+    return segs.some((s) => s === '__MACOSX') ||
+           JUNK_BASENAMES.has((segs[segs.length - 1] || '').toLowerCase());
+  };
+
+  function pickZipTargets(names, targets) {
+    const picked = [];
+    let skipped = 0;
+    for (const name of names) {
+      const segs = String(name).split('/').filter(Boolean);
+      if (!segs.length) { skipped++; continue; }
+      if (!targets) { picked.push({ name, rel: segs.join('/') }); continue; }
+      const idx = segs.findIndex((s) => targets.includes(s.toLowerCase()));
+      if (idx === -1 || idx === segs.length - 1) { skipped++; continue; }
+      picked.push({ name, rel: segs.slice(idx).join('/') });
+    }
+    return { picked, skipped };
+  }
+
+  function makeFileSet(items) {
+    items.sort((a, b) => a.path.localeCompare(b.path, 'ru'));
+    const size = items.reduce((s, it) => s + it.size, 0);
+    const roots = new Set(items.map((it) => it.path.split('/')[0]));
+    const byExt = new Map();
+    for (const it of items) {
+      const m = /\.([a-z0-9]{1,8})$/i.exec(it.path);
+      const ext = m ? m[1].toLowerCase() : '—';
+      byExt.set(ext, (byExt.get(ext) || 0) + 1);
+    }
+    return { items, count: items.length, size,
+             root: roots.size === 1 ? [...roots][0] : null, byExt };
+  }
+
+  /* Последовательная распаковка с динамическим прогрессом по байтам */
+  async function extractZipSet(zip, targets, onProgress) {
+    const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir && !isJunkPath(n));
+    const { picked, skipped } = pickZipTargets(names, targets);
+    if (targets && !picked.length) return { set: null, skipped };
+
+    const sizes = picked.map((p) => {
+      const d = zip.files[p.name]._data;
+      return (d && d.uncompressedSize > 0) ? d.uncompressedSize : 0;
+    });
+    const total = sizes.reduce((a, b) => a + b, 0) || picked.length || 1;
+
+    let done = 0;
+    const items = [];
+    for (let i = 0; i < picked.length; i++) {
+      const entry = zip.files[picked[i].name];
+      const data = await entry.async('uint8array', (meta) => {
+        if (onProgress) {
+          const within = (sizes[i] || 1) * (meta.percent / 100);
+          onProgress(Math.min(99, Math.round(((done + within) / total) * 100)));
+        }
+      });
+      done += sizes[i] || data.length;
+      items.push({ file: data, path: picked[i].rel, size: data.length });
+      if (onProgress) onProgress(Math.round((done / total) * 100));
+    }
+    return { set: makeFileSet(items), skipped };
+  }
+
+  /* ветка обработчика drop: без папок вперемешку берём только .zip */
+  const pickDropZips = (files) => files.filter((f) => /\.zip$/i.test((f && f.name) || ''));
+
+
+/* ── экспорт для Node и ESM ── */
+const __testExports = { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickDropZips };
+if (typeof module !== 'undefined' && typeof module.exports !== 'undefined') {
+  module.exports = __testExports;
+}
+export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickDropZips };
+
+/* ═══════════════ БРАУЗЕРНЫЙ КОД (Vite ESM) ═══════════════ */
+(() => {
+  if (typeof document === 'undefined') return;
+
+  const $  = (sel, root) => (root || document).querySelector(sel);
+  const html = (markup) => {
+    const t = document.createElement('template');
+    t.innerHTML = markup.trim();
+    return t.content.firstElementChild;
+  };
+
+
   const GAMES = [
     {
       id: 'cs16', place: 'main', kind: 'standard',
@@ -153,82 +232,8 @@
      любой глубине и оставляет только содержимое целевой папки игры
      (cstrike / valve). Остальной контент игнорируется и вычищается. */
 
-  const JUNK_BASENAMES = new Set(['.ds_store', 'thumbs.db', 'desktop.ini']);
-  const isJunkPath = (name) => {
-    const segs = String(name).split('/');
-    return segs.some((s) => s === '__MACOSX') ||
-           JUNK_BASENAMES.has((segs[segs.length - 1] || '').toLowerCase());
-  };
 
-  function pickZipTargets(names, targets) {
-    const picked = [];
-    let skipped = 0;
-    for (const name of names) {
-      const segs = String(name).split('/').filter(Boolean);
-      if (!segs.length) { skipped++; continue; }
-      if (!targets) { picked.push({ name, rel: segs.join('/') }); continue; }
-      const idx = segs.findIndex((s) => targets.includes(s.toLowerCase()));
-      if (idx === -1 || idx === segs.length - 1) { skipped++; continue; }
-      picked.push({ name, rel: segs.slice(idx).join('/') });
-    }
-    return { picked, skipped };
-  }
 
-  function makeFileSet(items) {
-    items.sort((a, b) => a.path.localeCompare(b.path, 'ru'));
-    const size = items.reduce((s, it) => s + it.size, 0);
-    const roots = new Set(items.map((it) => it.path.split('/')[0]));
-    const byExt = new Map();
-    for (const it of items) {
-      const m = /\.([a-z0-9]{1,8})$/i.exec(it.path);
-      const ext = m ? m[1].toLowerCase() : '—';
-      byExt.set(ext, (byExt.get(ext) || 0) + 1);
-    }
-    return { items, count: items.length, size,
-             root: roots.size === 1 ? [...roots][0] : null, byExt };
-  }
-
-  /* Последовательная распаковка с динамическим прогрессом по байтам */
-  async function extractZipSet(zip, targets, onProgress) {
-    const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir && !isJunkPath(n));
-    const { picked, skipped } = pickZipTargets(names, targets);
-    if (targets && !picked.length) return { set: null, skipped };
-
-    const sizes = picked.map((p) => {
-      const d = zip.files[p.name]._data;
-      return (d && d.uncompressedSize > 0) ? d.uncompressedSize : 0;
-    });
-    const total = sizes.reduce((a, b) => a + b, 0) || picked.length || 1;
-
-    let done = 0;
-    const items = [];
-    for (let i = 0; i < picked.length; i++) {
-      const entry = zip.files[picked[i].name];
-      const data = await entry.async('uint8array', (meta) => {
-        if (onProgress) {
-          const within = (sizes[i] || 1) * (meta.percent / 100);
-          onProgress(Math.min(99, Math.round(((done + within) / total) * 100)));
-        }
-      });
-      done += sizes[i] || data.length;
-      items.push({ file: data, path: picked[i].rel, size: data.length });
-      if (onProgress) onProgress(Math.round((done / total) * 100));
-    }
-    return { set: makeFileSet(items), skipped };
-  }
-
-  /* ветка обработчика drop: без папок вперемешку берём только .zip */
-  const pickDropZips = (files) => files.filter((f) => /\.zip$/i.test((f && f.name) || ''));
-
-  /* ── экспорт для Node-юнит-тестов (в браузере игнорируется) ──── */
-  if (typeof document === 'undefined') {
-    if (typeof module !== 'undefined') {
-      module.exports = { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickDropZips };
-    }
-    return;
-  }
-
-  /* ═══════════════ НИЖЕ — ТОЛЬКО БРАУЗЕРНЫЙ КОД ═══════════════ */
 
   /* ── SVG-иконки ─────────────────────────────────────────────── */
   const I = {
@@ -1197,3 +1202,4 @@
   bindGlobal();
 
 })();
+
