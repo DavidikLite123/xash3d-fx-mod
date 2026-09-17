@@ -1,0 +1,11 @@
+# бинарные артефакты движка Xash3D FWGS (Emscripten): не диффить как текст
+/xash.js            binary
+/xash.html.mem      binary
+/server.js          binary
+/client.js          binary
+/menu.js            binary
+/public/xash.js         binary
+/public/xash.html.mem   binary
+/public/server.js       binary
+/public/client.js       binary
+/public/menu.js         binary

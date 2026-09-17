@@ -1,17 +1,31 @@
 /* ════════════════════════════════════════════════════════════════
-   HASH ONLINE · фронтенд-портал для движка «Ха-кэш»
-   Кроссплатформенный браузерный клиент (десктоп / мобильные)
+   HASH ONLINE · портал + боевой запуск НАСТОЯЩЕГО движка Xash3D FWGS
+   (оригинальный Emscripten/asm.js web-порт Half-Life / Counter-Strike)
 
-   Архитектура автономного ядра (engine/xash.js + /xash.js):
-     var Module = { ... }            — глобальный контракт Emscripten
-     Module.FS                       — виртуальная файловая система Emscripten
-     Module['arguments']             — стартовые параметры клиента игры
-     onRuntimeInitialized            — полноэкранный <canvas id="canvas">
-                                       + захват управления мышью (Pointer Lock).
+   Файлы движка лежат в корне репозитория и отдаются как есть:
+     /xash.js         — скомпилированное клиентское ядро Xash3D FWGS (asm.js)
+     /xash.html.mem   — инициализатор статической памяти ядра (Module.memoryInitializerRequest)
+     /server.js       — серверная игровая библиотека  → dlopen("server")
+     /client.js       — клиентская игровая библиотека → dlopen("client")
+     /menu.js         — библиотека меню движка        → dlopen("menu")
+
+   Порядок старта — ровно как в оригинальном web-порте Xash3D:
+     1. var Module = { ... }                      — глобальный контракт Emscripten
+        Module.canvas = document.getElementById('canvas')
+        Module['arguments'] = ['-game','cstrike','-dev','3','-takedmg']
+     2. XHR /xash.html.mem → Module.memoryInitializerRequest (до загрузки ядра)
+     3. <script src="/xash.js">, Module.preInit останавливает авто-запуск run()
+     4. <script src="/server.js">, /client.js, /menu.js → Module.DLFCN
+     5. Module.FS.mkdir('/xash/cstrike/…') + Module.FS.createDataFile(…) — побайтово
+     6. Module.run() → main(): движок сам рисует игру на <canvas id="canvas">
+
+   Никакого собственного рендерера в этом файле нет: WebGL-контекст создаёт
+   и использует только скомпилированное ядро движка.
    ════════════════════════════════════════════════════════════════ */
 'use strict';
 
-/* ── чистые функции (используются и в браузере, и в Node-тестах) ── */
+/* ═══════════════ ЧАСТЬ 1 · ЧИСТЫЕ ФУНКЦИИ ═══════════════ */
+
 const plural = (n, [one, few, many]) => {
   const m = n % 100, d = n % 10;
   if (m > 10 && m < 20) return many;
@@ -32,7 +46,10 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
-/* ── конфигурация платформ и фильтрация архива ──────────────── */
+/* Консоль движка использует цветовые коды GoldSrc (^1…^7) — в DOM их снимаем */
+const stripEngineColors = (s) => String(s == null ? '' : s).replace(/\^[0-9]/g, '');
+
+/* ═══════════════ ЧАСТЬ 2 · УМНАЯ РАСПАКОВКА .zip ═══════════════ */
 
 const JUNK_BASENAMES = new Set(['.ds_store', 'thumbs.db', 'desktop.ini']);
 const isJunkPath = (name) => {
@@ -101,20 +118,39 @@ async function extractZipSet(zip, targets, onProgress) {
 /* ветка обработчика drop: без папок вперемешку берём только .zip */
 const pickDropZips = (files) => files.filter((f) => /\.zip$/i.test((f && f.name) || ''));
 
-/* ════════════════════════════════════════════════════════════
-   ИНТЕГРАЦИЯ EMSCRIPTEN FS: ПУТИ, ПАПКИ И СТАРТОВЫЕ АРГУМЕНТЫ
-   ════════════════════════════════════════════════════════════ */
+/* ═══════════════ ЧАСТЬ 3 · EMSCRIPTEN FS (Module.FS) ═══════════════
+   Движок обязан увидеть каталоги /xash/cstrike/ или /xash/valve/
+   внутри своей памяти: туда побайтово пишутся распакованные файлы. */
+
+const ENGINE_ROOT = '/xash';
+const KNOWN_GAME_DIRS = ['valve', 'cstrike'];
+const BASE_GAME_DIR = 'valve';
+
+/** Каталог игры в ФС движка: cstrike (CS 1.6) или valve (Half-Life / моды) */
+function gameDirFor(gameId) {
+  const id = String(gameId || '').toLowerCase();
+  return (id.startsWith('cs') || id.includes('cstrike')) ? 'cstrike' : BASE_GAME_DIR;
+}
 
 /**
- * 1. Рекурсивное создание подпапок через Module.FS.mkdir(path),
- * если они ещё не созданы (например, /xash/cstrike/models/player/).
+ * Рекурсивное создание подпапок через Module.FS.mkdir(path)
+ * (например /xash/cstrike/models/player/urban/).
  */
+const __knownDirs = typeof WeakMap === 'function' ? new WeakMap() : null;
+
 function ensureFSDirectory(FS, dirPath) {
-  if (!FS || typeof FS.mkdir !== 'function') return;
+  if (!FS || typeof FS.mkdir !== 'function') return [];
   const parts = String(dirPath || '').split('/').filter(Boolean);
+  const created = [];
+  let known = null;
+  if (__knownDirs) {
+    known = __knownDirs.get(FS);
+    if (!known) { known = new Set(['/']); __knownDirs.set(FS, known); }
+  }
   let cur = '';
   for (const part of parts) {
     cur += '/' + part;
+    if (known && known.has(cur)) continue;
     let exists = false;
     try {
       if (typeof FS.analyzePath === 'function') {
@@ -127,38 +163,55 @@ function ensureFSDirectory(FS, dirPath) {
       exists = false;
     }
     if (!exists) {
-      try {
-        FS.mkdir(cur);
-      } catch (err) {
-        // Игнорируем ошибку, если каталог уже существует (EEXIST / errno 20)
-      }
+      try { FS.mkdir(cur); created.push(cur); } catch (err) { /* EEXIST — уже создан */ }
     }
+    if (known) known.add(cur);
   }
+  return created;
 }
 
 /**
- * 2. Преобразование относительного пути из ZIP-архива в абсолютный путь для FS движка:
- * - Для Half-Life все файлы монтируются строго начиная с пути: /xash/valve/
- * - Для Counter-Strike 1.6 все файлы монтируются строго начиная с пути: /xash/cstrike/
+ * Относительный путь из .zip → абсолютный путь виртуальной ФС Emscripten:
+ *   Half-Life      → /xash/valve/…
+ *   Counter-Strike → /xash/cstrike/…
+ * Если первый сегмент — известная игровая папка (valve/cstrike), она
+ * сохраняется (базовые ресурсы CS лежат в valve/ рядом с cstrike/).
  */
 function resolveFSAbsolutePath(gameId, relPath) {
-  const isCS = gameId === 'cs16' || gameId === 'cs16mod' || /cstrike/i.test(String(gameId));
-  const baseDir = isCS ? 'cstrike' : 'valve';
-  const prefix = `/xash/${baseDir}`;
+  let cleanRel = String(relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const segs = cleanRel.split('/').filter(Boolean);
+  const head = (segs[0] || '').toLowerCase();
 
-  let cleanRel = String(relPath || '').replace(/\\/g, '/');
-  cleanRel = cleanRel.replace(/^\/+/, '');
-  // Снимаем ведущий сегмент 'cstrike/' или 'valve/', чтобы не дублировать
-  cleanRel = cleanRel.replace(/^(?:cstrike|valve)\//i, '');
+  let baseDir;
+  if (KNOWN_GAME_DIRS.includes(head)) {
+    baseDir = head;                      // 'valve/…' или 'cstrike/…' — свой корень
+    segs.shift();
+  } else {
+    baseDir = gameDirFor(gameId);        // иначе — каталог выбранной игры
+  }
+  return `${ENGINE_ROOT}/${baseDir}/${segs.join('/')}`.replace(/\/+$/, '');
+}
 
-  return `${prefix}/${cleanRel}`;
+/** Приведение данных к Uint8Array (побайтовая запись в ФС движка) */
+function toUint8Array(data) {
+  if (data instanceof Uint8Array) return data;
+  if (typeof ArrayBuffer !== 'undefined' && data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (data && data.buffer instanceof ArrayBuffer) {
+    return new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength);
+  }
+  if (typeof data === 'string') {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(data);
+    const out = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) out[i] = data.charCodeAt(i) & 0xff;
+    return out;
+  }
+  return new Uint8Array(0);
 }
 
 /**
- * 1 & 2. Построчная и побайтовая запись файла в виртуальную файловую систему Emscripten.
- * Использует встроенную функцию:
- * Module.FS.createDataFile(parent_path, filename, uint8_array_data, canRead, canWrite, canOwn).
- * Перед записью рекурсивно создаёт подпапки через Module.FS.mkdir(path).
+ * Побайтовая запись файла в виртуальную файловую систему Emscripten:
+ *   Module.FS.mkdir('/xash/cstrike/подпапка')            — подпапки
+ *   Module.FS.createDataFile(parent, name, bytes, true, true, canOwn)
  */
 function mountFileToFS(FS, absPath, data, canRead = true, canWrite = true, canOwn = true) {
   if (!FS || typeof FS.createDataFile !== 'function') return false;
@@ -168,86 +221,234 @@ function mountFileToFS(FS, absPath, data, canRead = true, canWrite = true, canOw
   const filename = norm.slice(lastSlash + 1);
   if (!filename) return false;
 
-  // Рекурсивно создаём подпапки через Module.FS.mkdir
   ensureFSDirectory(FS, parentPath);
 
-  // Удаляем старый узел, если файл уже существовал, во избежание конфликта перезаписи
+  // перезапись: снимаем старый узел, если файл уже был смонтирован
   try {
-    if (typeof FS.analyzePath === 'function' && FS.analyzePath(norm).exists) {
-      if (typeof FS.unlink === 'function') FS.unlink(norm);
+    if (typeof FS.analyzePath === 'function' && FS.analyzePath(norm).exists && typeof FS.unlink === 'function') {
+      FS.unlink(norm);
     }
   } catch (_) {}
 
-  // Приведение данных к Uint8Array
-  let bytes = data;
-  if (!(bytes instanceof Uint8Array)) {
-    if (typeof data === 'string') {
-      bytes = new TextEncoder().encode(data);
-    } else if (data && data.buffer) {
-      bytes = new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength);
-    } else {
-      bytes = new Uint8Array(data || 0);
-    }
-  }
-
-  // Запись в Emscripten FS
+  const bytes = toUint8Array(data);
   FS.createDataFile(parentPath, filename, bytes, canRead, canWrite, canOwn);
   return true;
 }
 
-/**
- * 3. Стартовые аргументы клиента для Module['arguments']:
- * - Для CS 1.6: ["-game", "cstrike", "-dev", "3", "-log"]
- * - Для Half-Life: ["-dev", "3", "-log"]
- */
-function getLaunchArguments(gameId, modRoot) {
-  if (gameId === 'cs16') {
-    return ['-game', 'cstrike', '-dev', '3', '-log'];
-  }
-  if (gameId === 'hl1') {
-    return ['-dev', '3', '-log'];
-  }
-  if (gameId === 'cs16mod') {
-    return ['-game', modRoot || 'cstrike_mod', '-dev', '3', '-log'];
-  }
-  if (gameId === 'hl1mod') {
-    return ['-game', modRoot || 'valve_mod', '-dev', '3', '-log'];
-  }
-  return ['-dev', '3', '-log'];
+/** Массовое монтирование набора файлов (побайтово, с прогрессом) */
+function mountFileSet(FS, gameId, items, onProgress) {
+  const stat = { count: 0, bytes: 0, failed: 0, dirs: new Set() };
+  const list = Array.from(items || []);
+  list.forEach((it, i) => {
+    const abs = it.absPath || resolveFSAbsolutePath(gameId, it.path);
+    try {
+      if (mountFileToFS(FS, abs, it.file !== undefined ? it.file : it.data)) {
+        stat.count++;
+        stat.bytes += (it.size || (it.file && it.file.length) || 0);
+        stat.dirs.add(abs.slice(0, abs.lastIndexOf('/')));
+      } else stat.failed++;
+    } catch (err) {
+      stat.failed++;
+    }
+    if (onProgress && (i % 32 === 0 || i === list.length - 1)) {
+      onProgress(Math.round(((i + 1) / (list.length || 1)) * 100), i + 1, list.length);
+    }
+  });
+  stat.dirCount = stat.dirs.size;
+  return stat;
 }
 
-/* ── экспорт для Node и ESM ── */
+/** Подготовка ФС движка: /xash, каталог игры, базовый valve/, cwd = /xash */
+function setupEngineFS(FS, gameDir) {
+  ensureFSDirectory(FS, ENGINE_ROOT);
+  ensureFSDirectory(FS, `${ENGINE_ROOT}/${BASE_GAME_DIR}`);
+  const dir = gameDir || BASE_GAME_DIR;
+  ensureFSDirectory(FS, `${ENGINE_ROOT}/${dir}`);
+  try { if (typeof FS.chdir === 'function') FS.chdir(ENGINE_ROOT); } catch (_) {}
+  return `${ENGINE_ROOT}/${dir}`;
+}
+
+/** Имя каталога мода для -game (латиница/цифры, как ожидает движок) */
+function sanitizeDirName(name) {
+  const clean = String(name || '').trim().toLowerCase()
+    .replace(/[^a-z0-9_\-]+/g, '').slice(0, 32);
+  return clean || null;
+}
+
+/**
+ * Движку нужен liblist.gam (или gameinfo.txt) в каталоге мода —
+ * если в архиве мода его нет, создаём минимальный.
+ */
+function ensureModGameInfo(FS, modDir, title) {
+  if (!FS || !modDir) return false;
+  const dir = `${ENGINE_ROOT}/${modDir}`;
+  ensureFSDirectory(FS, dir);
+  for (const name of ['liblist.gam', 'gameinfo.txt']) {
+    try {
+      if (typeof FS.analyzePath === 'function' && FS.analyzePath(`${dir}/${name}`).exists) return false;
+    } catch (_) {}
+  }
+  const text = [
+    `game "${title || modDir}"`,
+    `gamedir "${modDir}"`,
+    'url_info "https://hash.online/"',
+    'version "1.0"',
+    'type "multiplayer_only"',
+    '',
+  ].join('\n');
+  return mountFileToFS(FS, `${dir}/liblist.gam`, text, true, true, false);
+}
+
+/* ═══════════════ ЧАСТЬ 4 · АРГУМЕНТЫ ЗАПУСКА (Module['arguments']) ═══════════════ */
+
+/**
+ * Базовые параметры клиента:
+ *   Counter-Strike 1.6 → ['-game','cstrike','-dev','3','-takedmg']
+ *   Half-Life          → ['-dev','3','-takedmg']
+ *   мод                → ['-game','<каталог_мода>','-dev','3','-takedmg']
+ */
+function getLaunchArguments(gameId, modRoot) {
+  const args = [];
+  const dir = modRoot || (gameDirFor(gameId) === 'cstrike' ? 'cstrike' : null);
+  if (dir) args.push('-game', dir);
+  args.push('-dev', '3', '-takedmg');
+  return args;
+}
+
+/** Базовые параметры + размер окна движка (-width/-height понимают оригинал) */
+function buildEngineArguments(gameId, modRoot, viewport) {
+  const args = getLaunchArguments(gameId, modRoot);
+  const w = Math.max(320, Math.round((viewport && viewport.width) || 1280));
+  const h = Math.max(240, Math.round((viewport && viewport.height) || 720));
+  args.push('-width', String(w), '-height', String(h));
+  return args;
+}
+
+/* ═══════════════ ЧАСТЬ 5 · КОНТРАКТ var Module (оригинальный Xash3D Web-порт) ═══════════════ */
+
+/* цепочка скриптов: ядро + серверная/клиентская/меню-библиотеки движка */
+const ENGINE_SCRIPTS = ['/xash.js', '/server.js', '/client.js', '/menu.js'];
+const ENGINE_MEMORY_INITIALIZER = '/xash.html.mem';
+const ENGINE_TOTAL_MEMORY_MB = 256;   // asm.js без ALLOW_MEMORY_GROWTH: запас задаём сразу
+
+/** Адрес websockify-прокси для сетевой части движка (Module['websocket']) */
+function websocketProxyUrl(host) {
+  const h = String(host || '').replace(/^ws(proxy)?:\/\//, '').replace(/\/$/, '');
+  return h ? `wsproxy://${h}/` : '';
+}
+
+/**
+ * Объект, который становится глобальным `var Module` для Emscripten.
+ * Ровно тот контракт, которого требует оригинальный порт Xash3D:
+ * canvas, arguments, TOTAL_MEMORY, print/printErr, setStatus,
+ * monitorRunDependencies, onRuntimeInitialized, preInit (остановка авто-run),
+ * websocket (сетевая часть), locateFile (xash.html.mem).
+ */
+function buildModuleConfig(opts = {}) {
+  const noop = () => {};
+  const {
+    canvas = null,
+    args = [],
+    totalMemoryMB = ENGINE_TOTAL_MEMORY_MB,
+    websocketUrl = '',
+    thisProgram = './xash3d',
+    onPrint = noop, onErr = noop, onStatus = noop,
+    onDeps = noop, onRuntime = noop, onHaltRun = noop,
+  } = opts;
+
+  const Module = {
+    /* память: статика ядра ~64 МБ + стек/куча игры */
+    TOTAL_MEMORY: Math.max(128, Math.round(totalMemoryMB) || ENGINE_TOTAL_MEMORY_MB) * 1024 * 1024,
+    thisProgram,
+
+    /* стартовые параметры клиента игры */
+    arguments: Array.isArray(args) ? args.slice() : [],
+
+    /* холст передаётся в Emscripten напрямую: рисует только движок */
+    canvas: canvas || null,
+
+    preRun: [],
+    postRun: [],
+
+    print(text) { onPrint(stripEngineColors(text)); },
+    printErr(text) { onErr(stripEngineColors(text)); },
+    setStatus(text) { onStatus(text); },
+
+    totalDependencies: 0,
+    monitorRunDependencies(left) {
+      this.totalDependencies = Math.max(this.totalDependencies, left);
+      onDeps(left, this.totalDependencies);
+    },
+
+    onRuntimeInitialized() { onRuntime(); },
+
+    /* как в оригинальном xash.html: перехватываем авто-запуск run(),
+       чтобы сначала побайтово смонтировать файлы игры в Module.FS */
+    preInit: [function skipRun() { onHaltRun(Module); }],
+
+    locateFile(path) {
+      return path === 'xash.html.mem' ? ENGINE_MEMORY_INITIALIZER : path;
+    },
+
+    /* сетевая часть движка (websockify-прокси) */
+    websocket: [],
+  };
+  Module.websocket.url = websocketUrl || '';
+  return Module;
+}
+
+/**
+ * Остановка авто-запуска ядра (Module.preInit): сохраняем настоящую run()
+ * из xash.js и подменяем её заглушкой — main() стартует только по кнопке.
+ */
+function haltEngineRun(scope) {
+  const real = scope && scope.run;
+  if (typeof real !== 'function') return null;
+  const halt = function haltRun() {};
+  scope.run = halt;
+  if (scope.Module) scope.Module.run = halt;
+  return real;
+}
+
+/** Возврат настоящей run() и старт main() с нашими аргументами */
+function resumeEngineRun(scope, savedRun, args) {
+  if (typeof savedRun !== 'function') throw new Error('ядро движка не загружено: run() недоступна');
+  scope.run = savedRun;
+  if (scope.Module) {
+    scope.Module.run = savedRun;
+    if (args) scope.Module.arguments = args.slice();
+  }
+  return savedRun(args || (scope.Module && scope.Module.arguments) || []);
+}
+
+/* ── экспорт для Node-тестов и ESM ── */
 const __testExports = {
-  pickZipTargets,
-  isJunkPath,
-  extractZipSet,
-  makeFileSet,
-  fmtBytes,
-  pickDropZips,
-  ensureFSDirectory,
-  mountFileToFS,
-  resolveFSAbsolutePath,
-  getLaunchArguments,
+  plural, filesLabel, fmtBytes, escapeHtml, stripEngineColors,
+  isJunkPath, pickZipTargets, makeFileSet, extractZipSet, pickDropZips,
+  ENGINE_ROOT, KNOWN_GAME_DIRS, BASE_GAME_DIR, gameDirFor,
+  ensureFSDirectory, resolveFSAbsolutePath, mountFileToFS, mountFileSet,
+  setupEngineFS, sanitizeDirName, ensureModGameInfo, toUint8Array,
+  getLaunchArguments, buildEngineArguments,
+  ENGINE_SCRIPTS, ENGINE_MEMORY_INITIALIZER, ENGINE_TOTAL_MEMORY_MB,
+  websocketProxyUrl, buildModuleConfig, haltEngineRun, resumeEngineRun,
 };
 if (typeof module !== 'undefined' && typeof module.exports !== 'undefined') {
   module.exports = __testExports;
 }
 export {
-  pickZipTargets,
-  isJunkPath,
-  extractZipSet,
-  makeFileSet,
-  fmtBytes,
-  pickDropZips,
-  ensureFSDirectory,
-  mountFileToFS,
-  resolveFSAbsolutePath,
-  getLaunchArguments,
+  fmtBytes, escapeHtml, stripEngineColors,
+  isJunkPath, pickZipTargets, makeFileSet, extractZipSet, pickDropZips,
+  ENGINE_ROOT, KNOWN_GAME_DIRS, gameDirFor,
+  ensureFSDirectory, resolveFSAbsolutePath, mountFileToFS, mountFileSet,
+  setupEngineFS, sanitizeDirName, ensureModGameInfo, toUint8Array,
+  getLaunchArguments, buildEngineArguments,
+  ENGINE_SCRIPTS, ENGINE_MEMORY_INITIALIZER, ENGINE_TOTAL_MEMORY_MB,
+  websocketProxyUrl, buildModuleConfig, haltEngineRun, resumeEngineRun,
 };
 
-/* ═══════════════ БРАУЗЕРНЫЙ КОД (Vite ESM) ═══════════════ */
+/* ═══════════════ ЧАСТЬ 6 · БРАУЗЕР (UI + РЕАЛЬНЫЙ ЗАПУСК ДВИЖКА) ═══════════════ */
 (() => {
-  if (typeof document === 'undefined') return;
+  if (typeof document === 'undefined' || typeof window === 'undefined') return;
 
   const $ = (sel, root) => (root || document).querySelector(sel);
   const html = (markup) => {
@@ -261,40 +462,45 @@ export {
       id: 'cs16', place: 'main', kind: 'standard',
       title: 'Counter-Strike 1.6',
       desc: 'Основная турнирная игра портала. Легендарный командный шутер.',
-      chips: ['ха-кэш', 'cstrike/', 'multiplayer'],
+      chips: ['xash3d', 'cstrike/', 'multiplayer'],
       accent: '#ffb454',
       icon: 'crosshair',
-      expect: ['cstrike'],
+      /* ищем в архиве и cstrike/, и базовый valve/ (ресурсы движка) */
+      expect: ['cstrike', 'valve'],
+      primary: 'cstrike',
       modalSub: 'Оригинальные файлы игры · папка мобильного кэша cstrike',
     },
     {
       id: 'hl1', place: 'main', kind: 'standard',
       title: 'Half-Life',
       desc: 'Классическая сюжетная игра. С неё всё началось.',
-      chips: ['ха-кэш', 'valve/', 'singleplayer'],
+      chips: ['xash3d', 'valve/', 'singleplayer'],
       accent: '#ff7a29',
       icon: 'lambda',
       expect: ['valve'],
+      primary: 'valve',
       modalSub: 'Оригинальные файлы игры · папка мобильного кэша valve',
     },
     {
       id: 'cs16mod', place: 'extra', kind: 'modified',
       title: 'Модифицированная CS 1.6',
       desc: 'Оригинальный кэш + кастомные модели и текстуры мода поверх.',
-      chips: ['ха-кэш', 'cstrike/', '+ mod'],
+      chips: ['xash3d', 'cstrike/', '+ mod'],
       accent: '#35c9ff',
       icon: 'mod',
-      expect: ['cstrike'],
+      expect: ['cstrike', 'valve'],
+      primary: 'cstrike',
       modalSub: 'Требуются два набора файлов: игра + модификация',
     },
     {
       id: 'hl1mod', place: 'extra', kind: 'modified',
       title: 'Модифицированная Half-Life',
       desc: 'Оригинальный кэш valve + ресурсы вашей модификации поверх.',
-      chips: ['ха-кэш', 'valve/', '+ mod'],
+      chips: ['xash3d', 'valve/', '+ mod'],
       accent: '#9d6bff',
       icon: 'mod',
       expect: ['valve'],
+      primary: 'valve',
       modalSub: 'Требуются два набора файлов: игра + модификация',
     },
     {
@@ -315,7 +521,7 @@ export {
   const LINKS = {
     cs: {
       where: {
-        note: 'Мобильный кэш — это папка <b>«cstrike»</b> из установленной игры, упакованная в .zip (обычно 100–190 МБ). Скопируйте папку из своей копии игры → сожмите в .zip → загрузите сюда.',
+        note: 'Мобильный кэш — это папка <b>«cstrike»</b> из установленной игры, упакованная в .zip (обычно 100–190 МБ). Движку также нужна базовая папка <b>«valve»</b> (gfx.wad, halflife.wad, модели) — положите её в тот же архив или загрузите вторым файлом.',
         links: [
           { host: 'официальный сайт', title: 'Counter-Strike — официальная страница',
             url: 'https://www.counter-strike.net/', desc: 'получите игру, затем соберите кэш из папки cstrike' },
@@ -324,7 +530,7 @@ export {
         ],
       },
       mods: {
-        note: 'Бесплатные модификации, совместимые с движком «Ха-кэш»: скачайте .zip и загрузите в поле «Файлы мода» — содержимое наложится в памяти поверх оригинального кэша.',
+        note: 'Бесплатные модификации: скачайте .zip и загрузите в поле «Файлы мода» — содержимое побайтово наложится поверх кэша игры в Module.FS.',
         links: [
           { host: 'gamebanana.com', title: 'GameBanana — моды и скины CS 1.6',
             url: 'https://gamebanana.com/games/4254', desc: 'оружие, звуки, модели игроков и интерфейсы' },
@@ -342,7 +548,7 @@ export {
         ],
       },
       mods: {
-        note: 'Моды для Half-Life (например, They Hunger, Poke646 и др.): загрузите .zip архива мода во второе поле.',
+        note: 'Моды для Half-Life (They Hunger, Poke644 и др.): загрузите .zip архива мода во второе поле — каталог мода будет смонтирован в /xash/<имя_мода>.',
         links: [
           { host: 'runthinkshootlive.com', title: 'Run Think Shoot Live',
             url: 'https://www.runthinkshootlive.com/', desc: 'каталог синглплеерных модификаций для Half-Life' },
@@ -351,40 +557,34 @@ export {
     },
   };
 
-  const linksFor = (g) => (g.expect[0] === 'cstrike' ? LINKS.cs : LINKS.hl);
+  const linksFor = (g) => (g.primary === 'cstrike' ? LINKS.cs : LINKS.hl);
 
-  /* ── SVG-иконки ─────────────────────────────────────────────── */
+  /* ── SVG-иконки интерфейса портала (не имеют отношения к рендеру игры) ── */
   const I = {
     crosshair: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
-      <circle cx="24" cy="24" r="12.5"/>
-      <circle cx="24" cy="24" r="2.6" fill="currentColor" stroke="none"/>
+      <circle cx="24" cy="24" r="12.5"/><circle cx="24" cy="24" r="2.6" fill="currentColor" stroke="none"/>
       <path d="M24 3v9M24 36v9M3 24h9M36 24h9"/></svg>`,
     lambda: `<svg viewBox="0 0 48 48" fill="none">
       <text x="24" y="37" text-anchor="middle" font-size="38" font-family="Georgia, 'Times New Roman', serif" fill="currentColor">λ</text></svg>`,
     mod: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M24 5 43 14 24 23 5 14Z"/>
-      <path d="M43 22.5 24 31.5 5 22.5"/>
-      <circle cx="37" cy="37" r="8" fill="#0b1120"/>
-      <path d="M37 32.5v9M32.5 37h9"/></svg>`,
+      <path d="M24 5 43 14 24 23 5 14Z"/><path d="M43 22.5 24 31.5 5 22.5"/>
+      <circle cx="37" cy="37" r="8" fill="#0b1120"/><path d="M37 32.5v9M32.5 37h9"/></svg>`,
     source: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor">
       <path d="M41 24 32.5 38.7h-17L7 24 15.5 9.3h17Z" stroke-width="2.2" stroke-linejoin="round"/>
       <text x="24" y="31.5" text-anchor="middle" font-size="19" font-weight="700" font-family="inherit" fill="currentColor" stroke="none">S</text></svg>`,
     upload: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M24 31V9M15 18l9-9 9 9"/>
-      <path d="M8 30v7a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-7"/></svg>`,
-    folder: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round">
-      <path d="M5 13a3 3 0 0 1 3-3h10l4 6h18a3 3 0 0 1 3 3v16a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V13Z"/>
-      <path d="M5 22h38"/></svg>`,
+      <path d="M24 31V9M15 18l9-9 9 9"/><path d="M8 30v7a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-7"/></svg>`,
+    folder: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5 13a3 3 0 0 1 3-3h10l4 6h18a3 3 0 0 1 3 3v16a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V13Z"/><path d="M5 22h38"/></svg>`,
     zip: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="10" y="7" width="28" height="34" rx="4"/>
-      <path d="M24 7v5M21 15h6M24 19v5M21 27h6M24 31v4"/></svg>`,
+      <rect x="10" y="7" width="28" height="34" rx="4"/><path d="M24 7v5M21 15h6M24 19v5M21 27h6M24 31v4"/></svg>`,
     x: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
       <path d="M13 13l22 22M35 13 13 35"/></svg>`,
     check: `<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
       <path d="M9 26l11 11L40 13"/></svg>`,
   };
 
-  /* ── состояние библиотеки ── */
+  /* ── состояние библиотеки файлов ── */
   const library = new Map();
   const libEntry = (id) => {
     if (!library.has(id)) library.set(id, { game: null, mod: null });
@@ -395,46 +595,279 @@ export {
     return g.kind === 'modified' ? !!(fs.game && fs.mod) : !!fs.game;
   };
 
-  /* ── глобальный кэш смонтированных файлов для FS ── */
-  const mountedFilesCache = new Map(); // absPath -> Uint8Array
+  /* ═══════════ ЭКРАН ЗАГРУЗКИ ЯДРА (реальный прогресс Emscripten) ═══════════ */
+  const bootOverlay = $('#boot-overlay');
+  const bootStep = $('#boot-step');
+  const bootBar = $('#boot-bar');
+  const bootLogEl = $('#boot-log');
 
-  function syncCacheToFS(FS) {
-    if (!FS || typeof FS.createDataFile !== 'function') return;
-    for (const [absPath, bytes] of mountedFilesCache) {
-      mountFileToFS(FS, absPath, bytes, true, true, true);
-    }
+  function bootShow(show) {
+    if (!bootOverlay) return;
+    bootOverlay.classList.toggle('is-active', !!show);
+    bootOverlay.setAttribute('aria-hidden', show ? 'false' : 'true');
+  }
+  function bootStepText(text, pct) {
+    if (bootStep) bootStep.textContent = text;
+    if (bootBar && typeof pct === 'number') bootBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  }
+  const bootLines = [];
+  let bootDirty = false;
+  function bootLine(text, kind) {
+    const line = stripEngineColors(text);
+    if (!line) return;
+    bootLines.push(kind === 'err' ? `! ${line}` : line);
+    if (bootLines.length > 500) bootLines.splice(0, bootLines.length - 500);
+    bootDirty = true;                    // DOM обновляется пачкой (см. flushBootLog)
+    pushEngineLog(line, kind);
+  }
+  /* вывод ядра при -dev 3 идёт потоком: пишем в DOM не чаще 4 раз в секунду */
+  function flushBootLog() {
+    if (!bootDirty || !bootLogEl) return;
+    bootDirty = false;
+    bootLogEl.textContent = bootLines.slice(-80).join('\n');
+    bootLogEl.scrollTop = bootLogEl.scrollHeight;
   }
 
-  // Перехват присвоения FS в Module (когда подключается /xash.js)
-  if (typeof window !== 'undefined' && window.Module) {
-    let currentFS = window.Module.FS;
-    try {
-      Object.defineProperty(window.Module, 'FS', {
-        get() { return currentFS; },
-        set(newFS) {
-          currentFS = newFS;
-          if (newFS) syncCacheToFS(newFS);
-        },
-        configurable: true,
-        enumerable: true,
-      });
-    } catch (_) {}
+  /* ═══════════ КОНСОЛЬ ДВИЖКА (вывод Module.print / printErr) ═══════════ */
+  const engineConsole = $('#engine-console');
+  const engineConsoleLog = $('#engine-console-log');
+  const engineLogLines = [];
+  let consoleDirty = false;
 
-    if (!Array.isArray(window.Module.preRun)) {
-      window.Module.preRun = [];
+  function pushEngineLog(text, kind) {
+    engineLogLines.push({ t: text, k: kind || '' });
+    if (engineLogLines.length > 600) engineLogLines.splice(0, engineLogLines.length - 600);
+    consoleDirty = true;
+  }
+  function flushEngineConsole() {
+    if (!consoleDirty || !engineConsoleLog) return;
+    consoleDirty = false;
+    if (!engineConsole || engineConsole.classList.contains('is-open')) {
+      engineConsoleLog.textContent = engineLogLines.slice(-250).map((l) => (l.k === 'err' ? '! ' : '') + l.t).join('\n');
+      engineConsoleLog.scrollTop = engineConsoleLog.scrollHeight;
     }
-    window.Module.preRun.push(() => {
-      if (window.Module && window.Module.FS) {
-        syncCacheToFS(window.Module.FS);
+  }
+  setInterval(() => { flushBootLog(); flushEngineConsole(); }, 250);
+
+  function toggleEngineConsole(force) {
+    if (!engineConsole) return;
+    const open = force === undefined ? !engineConsole.classList.contains('is-open') : !!force;
+    engineConsole.classList.toggle('is-open', open);
+    const btn = $('#hud-console');
+    if (btn) btn.classList.toggle('is-on', open);
+    if (open) { consoleDirty = true; flushEngineConsole(); }
+  }
+
+  /* ═══════════ ДВИЖОК: загрузка оригинального xash.js и старт main() ═══════════ */
+  const engine = {
+    status: 'idle',            // idle | loading | ready | running | error
+    loadedScripts: [],
+    savedRun: null,
+    depsLeft: 0,
+    depsSeen: 0,
+    memBytes: 0,
+    error: null,
+    totalMemoryMB: readMemorySetting(),
+    promise: null,
+    get Module() { return window.Module || null; },
+    get FS() { return (window.Module && window.Module.FS) || null; },
+  };
+
+  function readMemorySetting() {
+    try {
+      const m = /[#&]mem=(\d{2,4})/.exec(window.location.hash || '');
+      const saved = Number(window.localStorage.getItem('hash.memoryMB'));
+      const val = Number(m ? m[1] : saved) || ENGINE_TOTAL_MEMORY_MB;
+      return Math.min(2048, Math.max(128, val));
+    } catch (_) { return ENGINE_TOTAL_MEMORY_MB; }
+  }
+  function saveMemorySetting(mb) {
+    engine.totalMemoryMB = mb;
+    try { window.localStorage.setItem('hash.memoryMB', String(mb)); } catch (_) {}
+  }
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src;
+      el.async = false;                 // порядок цепочки важен
+      el.onload = () => resolve(src);
+      el.onerror = () => reject(new Error(`не удалось загрузить ${src}`));
+      document.body.appendChild(el);
+    });
+  }
+
+  /* Инициализатор памяти ядра грузим XHR'ом ДО xash.js — как в оригинальном порте */
+  function preloadMemoryInitializer() {
+    return new Promise((resolve) => {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', ENGINE_MEMORY_INITIALIZER, true);
+        xhr.responseType = 'arraybuffer';
+        xhr.onprogress = (e) => {
+          if (e.total) {
+            engine.memBytes = e.total;
+            bootStepText(`xash.html.mem · ${fmtBytes(e.loaded)} из ${fmtBytes(e.total)}`,
+              Math.round((e.loaded / e.total) * 100));
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status === 200 || xhr.status === 0) {
+            window.Module.memoryInitializerRequest = xhr;
+            engine.memBytes = (xhr.response && xhr.response.byteLength) || 0;
+            bootLine(`xash.html.mem загружен: ${fmtBytes(engine.memBytes)}`);
+          } else {
+            bootLine(`xash.html.mem: HTTP ${xhr.status} — ядро загрузит его само`, 'err');
+          }
+          resolve();
+        };
+        xhr.onerror = () => { bootLine('xash.html.mem: ошибка сети', 'err'); resolve(); };
+        xhr.send(null);
+      } catch (err) {
+        bootLine('xash.html.mem: ' + (err && err.message), 'err');
+        resolve();
       }
     });
+  }
 
-    // Фоновая загрузка оригинального glue /xash.js для прогрева Emscripten MEMFS
-    if (window.XashCore && typeof window.XashCore.loadRealGlue === 'function') {
-      window.XashCore.loadRealGlue({ timeoutMs: 30000 })
-        .then((glue) => { if (glue && glue.FS) syncCacheToFS(glue.FS); })
-        .catch(() => {});
+  /* Ждём, пока ядро применит xash.html.mem (run-dependencies → 0) и оживит FS */
+  function waitForRunDependencies(timeoutMs = 90000) {
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+      const iv = setInterval(() => {
+        const fsReady = !!(window.Module && window.Module.FS);
+        const settled = engine.depsLeft === 0
+          && (engine.depsSeen > 0 || (fsReady && Date.now() - t0 > 1500));
+        if (settled) { clearInterval(iv); resolve(); }
+        else if (Date.now() - t0 > timeoutMs) {
+          clearInterval(iv);
+          reject(new Error('ядро движка не завершило инициализацию (таймаут xash.html.mem)'));
+        }
+      }, 40);
+    });
+  }
+
+  /** Загрузка ядра: var Module → xash.html.mem → /xash.js → /server.js → /client.js → /menu.js */
+  async function ensureEngineLoaded(opts = {}) {
+    if (engine.status === 'running') return engine;
+    if (engine.status === 'error') throw new Error(engine.error || 'ядро движка в ошибке');
+    if (engine.promise) {
+      if (opts.showOverlay) bootShow(true);
+      return engine.promise;
     }
+
+    engine.status = 'loading';
+    engine.promise = (async () => {
+      if (opts.showOverlay) bootShow(true);
+      bootStepText('инициализация var Module …', 2);
+
+      const canvasEl = document.getElementById('canvas');
+
+      /* ТРЕБОВАНИЕ 2: объект var Module — контракт оригинального Xash3D Web-порта.
+         Module.canvas = document.getElementById('canvas') передаёт холст напрямую
+         в Emscripten: графику игры рисует само ядро движка. */
+      window.Module = buildModuleConfig({
+        canvas: canvasEl,
+        args: [],
+        totalMemoryMB: engine.totalMemoryMB,
+        websocketUrl: websocketProxyUrl(window.location.host),
+        onPrint: (text) => { bootLine(text); noteEngineFatal(text); },
+        onErr: (text) => { bootLine(text, 'err'); console.warn('[xash3d]', text); noteEngineFatal(text); },
+        onStatus: (text) => { if (text) bootStepText(text, undefined); },
+        onDeps: (left) => { engine.depsLeft = left; engine.depsSeen = Math.max(engine.depsSeen, left); },
+        onRuntime: () => bootLine('onRuntimeInitialized: runtime ядра готов'),
+        onHaltRun: () => {
+          engine.savedRun = haltEngineRun(window);
+          bootLine(engine.savedRun
+            ? 'run() перехвачен (preInit): main() стартует после монтирования файлов'
+            : 'run() не найдена — авто-запуск не перехвачен', engine.savedRun ? '' : 'err');
+        },
+      });
+      window.Module.canvas = canvasEl;      // явно, как требует оригинальный порт
+      bootLine(`Module: TOTAL_MEMORY=${fmtBytes(window.Module.TOTAL_MEMORY)} · canvas=#canvas · websocket=${window.Module.websocket.url || '—'}`);
+
+      await preloadMemoryInitializer();
+      bootStepText('загрузка /xash.html.mem …', 8);
+
+      for (let i = 0; i < ENGINE_SCRIPTS.length; i++) {
+        const src = ENGINE_SCRIPTS[i];
+        bootStepText(`загрузка ${src} …`, 10 + Math.round((i / ENGINE_SCRIPTS.length) * 55));
+        await loadScript(src);
+        engine.loadedScripts.push(src);
+        bootLine(`скрипт подключён: ${src}`);
+      }
+
+      bootStepText('инициализация памяти ядра …', 70);
+      await waitForRunDependencies();
+
+      const libs = Object.keys((window.Module.DLFCN && window.Module.DLFCN.loadedLibNames) || {});
+      bootLine(`библиотеки движка в DLFCN: ${libs.join(', ') || '—'}`);
+      if (!window.Module.FS) throw new Error('Module.FS недоступна после загрузки ядра');
+
+      engine.status = 'ready';
+      bootStepText('ядро готово: Emscripten FS активна', 100);
+      return engine;
+    })().catch((err) => {
+      engine.status = 'error';
+      engine.error = err && (err.message || String(err));
+      bootLine('ОШИБКА ЗАПУСКА ЯДРА: ' + engine.error, 'err');
+      bootStepText('ошибка: ' + engine.error, 100);
+      throw err;
+    });
+    return engine.promise;
+  }
+
+  /* ── монтирование распакованного кэша в настоящую Module.FS ── */
+  const mountedCache = new Map();     // absPath → Uint8Array
+  const pendingItems = [];            // ещё не записанные в ФС файлы
+
+  function cacheItem(absPath, bytes) {
+    const prev = mountedCache.get(absPath);
+    mountedCache.set(absPath, bytes);
+    return { absPath, overwritten: !!prev };
+  }
+
+  function mountCachedToEngineFS(onProgress) {
+    const FS = engine.FS;
+    if (!FS) return null;
+    const list = pendingItems.splice(0, pendingItems.length)
+      .map((it) => ({ absPath: it.absPath, file: it.bytes, size: it.bytes.length }));
+    if (!list.length) return { count: 0, bytes: 0, failed: 0, dirCount: 0 };
+    return mountFileSet(FS, null, list, onProgress);
+  }
+
+  async function bytesOf(item) {
+    const f = item.file !== undefined ? item.file : item.data;
+    if (f instanceof Uint8Array) return f;
+    if (typeof Blob !== 'undefined' && f instanceof Blob) return new Uint8Array(await f.arrayBuffer());
+    return toUint8Array(f);
+  }
+
+  /** Запись набора файлов в кэш и (если ФС уже жива) сразу в Module.FS.
+   *  modRoot — каталог мода (если архив мода не valve/cstrike): тогда всё
+   *  дерево монтируется в /xash/<modRoot>/ и запускается через -game <modRoot>. */
+  async function stageItems(gameId, items, modRoot) {
+    let written = 0;
+    for (const item of items) {
+      const bytes = await bytesOf(item);
+      let abs;
+      if (modRoot) {
+        const rel = String(item.path || '').replace(/\\/g, '/').split('/').filter(Boolean);
+        if (rel[0] && rel[0].toLowerCase() === modRoot.toLowerCase()) rel.shift();
+        abs = `${ENGINE_ROOT}/${modRoot}/${rel.join('/')}`;
+      } else {
+        abs = resolveFSAbsolutePath(gameId, item.path);
+      }
+      const { overwritten } = cacheItem(abs, bytes);
+      if (overwritten) written++;
+      const FS = engine.FS;
+      if (FS) {
+        mountFileToFS(FS, abs, bytes, true, true, true);
+      } else {
+        pendingItems.push({ absPath: abs, bytes });
+      }
+    }
+    return { total: items.length, overwritten: written };
   }
 
   /* ── уведомления ────────────────────────────────────────────── */
@@ -442,10 +875,7 @@ export {
   function toast(message, type = 'info', ttl = 3600) {
     const note = html(`<div class="toast toast--${type}" role="status">${escapeHtml(message)}</div>`);
     toastRoot.appendChild(note);
-    const kill = () => {
-      note.classList.add('is-out');
-      setTimeout(() => note.remove(), 260);
-    };
+    const kill = () => { note.classList.add('is-out'); setTimeout(() => note.remove(), 260); };
     const t = setTimeout(kill, ttl);
     note.addEventListener('click', () => { clearTimeout(t); kill(); });
   }
@@ -469,7 +899,7 @@ export {
   function cardTpl(g) {
     const ready = isGameReady(g);
     const isPort = g.kind === 'port';
-    const card = html(`
+    return html(`
       <div class="game-card ${ready ? 'is-ready' : ''}" data-id="${g.id}" tabindex="0" role="button"
            style="--accent:${g.accent}" aria-label="${escapeHtml(g.title)}">
         <span class="game-card__scan"></span>
@@ -492,7 +922,6 @@ export {
           <span class="card-arrow" aria-hidden="true">→</span>
         </div>
       </div>`);
-    return card;
   }
 
   function renderCards() {
@@ -514,10 +943,7 @@ export {
     document.querySelectorAll('.game-card[data-id]').forEach((card) => {
       const g = gameById(card.dataset.id);
       const activate = () => {
-        if (g.kind === 'port') {
-          toast(g.message, 'warn', 4200);
-          return;
-        }
+        if (g.kind === 'port') { toast(g.message, 'warn', 4200); return; }
         openGameModal(g);
       };
       card.addEventListener('click', activate);
@@ -570,10 +996,17 @@ export {
     const ready = GAMES.filter((g) => g.kind !== 'port' && isGameReady(g)).length;
     const el = $('#menu-status');
     const text = $('.menu-status__text', el);
-    el.classList.toggle('is-on', ready > 0);
+    el.classList.toggle('is-on', ready > 0 || engine.status === 'ready');
+    const core = {
+      idle: 'ядро xash.js не загружено',
+      loading: 'загрузка ядра xash.js …',
+      ready: 'ядро xash3d готово',
+      running: 'движок запущен',
+      error: 'ошибка ядра',
+    }[engine.status] || '';
     text.textContent = ready > 0
-      ? `готово к запуску: ${ready}`
-      : 'библиотека пуста — загрузите файлы игры';
+      ? `готово к запуску: ${ready} · ${core}`
+      : `библиотека пуста — загрузите файлы игры · ${core}`;
   }
 
   /* ═══════════════ DRAG-AND-DROP (event.dataTransfer) ═══════════════ */
@@ -664,7 +1097,7 @@ export {
              aria-label="Загрузка файлов: ${escapeHtml(game.title)}" style="--accent:${game.accent}">
           <header class="modal__head">
             <div>
-              <div class="modal__eyebrow">Загрузка ресурсов · ${game.kind === 'modified' ? 'game + mod' : 'ха-кэш'}</div>
+              <div class="modal__eyebrow">Загрузка ресурсов · ${game.kind === 'modified' ? 'game + mod' : 'кэш игры'}</div>
               <h3 class="modal__title">${game.title}</h3>
               <div class="modal__sub">${game.modalSub}</div>
             </div>
@@ -672,6 +1105,14 @@ export {
           </header>
           <div class="modal__body">
             <div class="zones" id="zones"></div>
+            <div class="mem-row">
+              <label class="mem-label" for="mem-select">Память ядра (Module.TOTAL_MEMORY)</label>
+              <select id="mem-select" class="mem-select">
+                ${[192, 256, 384, 512, 768, 1024, 1536, 2048].map((mb) => `
+                  <option value="${mb}" ${mb === engine.totalMemoryMB ? 'selected' : ''}>${mb} МБ</option>`).join('')}
+              </select>
+              <span class="mem-hint" id="mem-hint"></span>
+            </div>
             <p class="modal__hint" id="launch-hint"></p>
           </div>
           <footer class="modal__foot">
@@ -685,18 +1126,32 @@ export {
     const zonesBox  = $('#zones', overlay);
     const btnLaunch = $('#btn-launch', overlay);
     const hint      = $('#launch-hint', overlay);
+    const memSelect = $('#mem-select', overlay);
+    const memHint   = $('#mem-hint', overlay);
+
+    const syncMemHint = () => {
+      memHint.textContent = engine.status === 'idle'
+        ? 'применится при загрузке /xash.js'
+        : `ядро уже ${engine.status === 'running' ? 'запущено' : 'загружено'} — значение применится после перезагрузки страницы`;
+      memSelect.disabled = engine.status !== 'idle';
+    };
+    memSelect.addEventListener('change', () => {
+      saveMemorySetting(Number(memSelect.value));
+      syncMemHint();
+    });
+    syncMemHint();
 
     const close = () => unmountOverlay(overlay);
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
     $('[data-close]', overlay).addEventListener('click', close);
 
     const zoneDefs = [{ key: 'game', label: 'Загрузить файлы игры',
-      hint: `.zip архив мобильного кэша — папка <b>${game.expect[0]}/</b> ищется автоматически<br>
+      hint: `.zip архив мобильного кэша — папки <b>${game.expect.join('</b> и <b>')}</b> ищутся автоматически<br>
              перетащите архив сюда или нажмите для выбора файла` }];
     if (game.kind === 'modified') {
       zoneDefs.push({ key: 'mod', label: 'Загрузить файлы мода',
-        hint: `.zip архив модификации — модели, текстуры, спрайты<br>
-               накладывается в памяти поверх кэша игры` });
+        hint: `.zip архив модификации — модели, текстуры, спрайты, карты<br>
+               побайтово накладывается поверх кэша игры в Module.FS` });
     }
 
     zonesBox.appendChild(buildZone(zoneDefs[0]));
@@ -704,6 +1159,13 @@ export {
     if (zoneDefs[1]) {
       zonesBox.appendChild(buildZone(zoneDefs[1]));
       zonesBox.appendChild(buildLinksBlock('mods', links.mods));
+    }
+
+    /* фоновая предзагрузка ядра движка, пока пользователь выбирает файлы */
+    if (engine.status === 'idle') {
+      ensureEngineLoaded()
+        .then(() => { mountCachedToEngineFS(); refreshMenuStatus(); syncMemHint(); })
+        .catch((err) => toast('Ядро движка не загрузилось: ' + (err && err.message), 'err', 6000));
     }
 
     function buildLinksBlock(type, cfg) {
@@ -785,20 +1247,14 @@ export {
           if (hasDir) {
             const set = await readDropped(dt);
             if (set.count) {
-              // Запись файлов в Emscripten FS до старта движка
-              const targetFs = window.Module && window.Module.FS;
-              for (const item of set.items) {
-                const absPath = resolveFSAbsolutePath(game.id, item.path);
-                mountFileToFS(targetFs, absPath, item.file, true, true, true);
-                mountedFilesCache.set(absPath, item.file);
-              }
+              await stageItems(game.id, set.items, zd.key === 'mod' ? modDirName(set) : null);
               acceptFiles(zd.key, set);
               return;
             }
           }
           toast('Перетащите .zip архив мобильного кэша', 'warn');
         } catch (err) {
-          toast('Не удалось прочитать файлы', 'err');
+          toast('Не удалось прочитать файлы: ' + (err && err.message), 'err');
         }
       });
 
@@ -806,7 +1262,7 @@ export {
       return zone;
     }
 
-    /* ── Умная распаковка .zip и построчная запись в Emscripten FS ── */
+    /* ── умная распаковка .zip и побайтовая запись в Module.FS ── */
     async function handleZipList(key, files) {
       const zips = files.filter((f) => /\.zip$/i.test(f.name));
       if (!zips.length) { toast('Нужны архивы формата .zip', 'warn'); return; }
@@ -816,7 +1272,7 @@ export {
       const zd = zoneDefs.find((z) => z.key === key);
 
       if (typeof JSZip === 'undefined') {
-        toast('Ошибка: модуль распаковки архивов не загружен', 'err');
+        toast('Ошибка: модуль распаковки архивов (JSZip) не загружен', 'err');
         return;
       }
 
@@ -839,14 +1295,10 @@ export {
             return;
           }
 
-          // ТРЕБОВАНИЕ 1 & 2: Построчно и побайтово монтируем распакованные файлы
-          // в реальную файловую систему Emscripten ДО старта xash.js
-          const targetFs = window.Module && window.Module.FS;
-          for (const item of res.set.items) {
-            const absPath = resolveFSAbsolutePath(game.id, item.path);
-            mountFileToFS(targetFs, absPath, item.file, true, true, true);
-            mountedFilesCache.set(absPath, item.file);
-          }
+          /* ТРЕБОВАНИЕ 3: каждый файл пишем побайтово в виртуальную ФС Emscripten
+             (Module.FS.mkdir + Module.FS.createDataFile) — сразу, как распаковали */
+          updateZoneProgress(zone, 100);
+          await stageItems(game.id, res.set.items, key === 'mod' ? modDirName(res.set) : null);
 
           merged.push(...res.set.items);
           skipped += res.skipped;
@@ -858,18 +1310,14 @@ export {
         }
       }
 
-      // ТРЕБОВАНИЕ 3: Задаем стартовые параметры запуска в Module['arguments']
-      const modRoot = fs.mod
-        ? (window.XashCore ? window.XashCore.sanitizeDirName(fs.mod.root) : 'mod')
-        : null;
-      if (window.Module) {
-        window.Module['arguments'] = getLaunchArguments(game.id, modRoot);
-      }
-
       zone.classList.remove('is-busy');
       acceptFiles(key, makeFileSet(merged));
       if (skipped > 0) {
-        toast(`Лишних файлов вне целевой папки: ${skipped} — очищены из памяти`, 'info', 4200);
+        toast(`Лишних файлов вне целевой папки: ${skipped} — в ФС движка не писались`, 'info', 4200);
+      }
+      const roots = [...new Set(merged.map((it) => it.path.split('/')[0].toLowerCase()))];
+      if (game.primary === 'cstrike' && key === 'game' && !roots.includes('valve')) {
+        toast('В архиве нет базовой папки valve/ — движку нужны gfx.wad/halflife.wad из неё. Добавьте её в архив или загрузите вторым файлом.', 'warn', 8000);
       }
     }
 
@@ -929,7 +1377,7 @@ export {
       const ok = set.items.some((it) =>
         it.path.split('/').some((seg) => game.expect.includes(seg.toLowerCase())));
       if (!ok) {
-        toast(`Папка «${game.expect[0]}» не найдена — проверьте, что выбран мобильный кэш игры`, 'warn', 4600);
+        toast(`Папка «${game.primary}» не найдена — проверьте, что выбран мобильный кэш игры`, 'warn', 4600);
       }
     }
 
@@ -941,7 +1389,7 @@ export {
       renderZone(zone, zd, set);
       updateLaunchState();
       refreshCard(game.id);
-      toast(`${zd.label.replace('Загрузить ', 'Смонтировано в FS: ')} — ${filesLabel(set.count)}`, 'ok');
+      toast(`${zd.label.replace('Загрузить ', 'Смонтировано в Module.FS: ')} — ${filesLabel(set.count)}`, 'ok');
     }
 
     function updateLaunchState() {
@@ -950,186 +1398,239 @@ export {
       if (game.kind === 'modified' && !fs.mod) missing.push('файлы мода');
       const ready = missing.length === 0;
 
-      btnLaunch.disabled = !ready;
+      btnLaunch.disabled = !ready || engine.status === 'running';
       btnLaunch.classList.toggle('is-live', ready);
       hint.classList.toggle('is-ok', ready);
-      hint.innerHTML = ready
-        ? 'файлы смонтированы в Emscripten FS — нажмите [ ЗАПУСТИТЬ ]'
-        : `добавьте <b>${missing.join('</b> и <b>')}</b>, чтобы продолжить`;
+      hint.innerHTML = engine.status === 'running'
+        ? 'движок уже запущен — для новой игры перезагрузите страницу'
+        : (ready
+          ? 'файлы побайтово смонтированы в Module.FS — нажмите [ ЗАПУСТИТЬ ]'
+          : `добавьте <b>${missing.join('</b> и <b>')}</b>, чтобы продолжить`);
     }
     updateLaunchState();
 
-    /* ТРЕБОВАНИЕ 4: Кнопка [ ЗАПУСТИТЬ ] вызывает метод инициализации движка,
-       плавно скрывает меню, раскрывает canvas на весь экран и передает Pointer Lock */
+    /* ТРЕБОВАНИЕ 2 и 4: кнопка [ ЗАПУСТИТЬ ] вызывает инициализацию
+       скомпилированного движка (xash.js) и старт main() */
     btnLaunch.addEventListener('click', async () => {
       btnLaunch.disabled = true;
       btnLaunch.textContent = 'ЗАПУСК...';
-
-      // Запрос Pointer Lock в рамках пользовательского жеста
       try {
-        const p = canvasEl.requestPointerLock();
-        if (p && p.catch) p.catch(() => {});
-      } catch (_) {}
-
-      unmountOverlay(overlay);
-      await launchGameEngine(game, { game: fs.game, mod: fs.mod });
+        await launchGameEngine(game, { game: fs.game, mod: fs.mod });
+        unmountOverlay(overlay);
+      } catch (err) {
+        btnLaunch.disabled = false;
+        btnLaunch.textContent = 'ЗАПУСТИТЬ';
+        toast('Движок не запустился: ' + (err && (err.message || err)), 'err', 9000);
+        bootShow(true);
+      }
     });
   }
 
-  /* ═══════════════ ЗАПУСК ДВИЖКА И ОБРАБОТКА ХОЛСТА (CANVAS) ═══════════════ */
+  /* ═══════════ ЗАПУСК НАСТОЯЩЕГО ДВИЖКА (xash.js → main()) ═══════════ */
   async function launchGameEngine(game, files) {
-    const isCS = game.id === 'cs16' || game.expect[0] === 'cstrike';
-    const modRoot = files.mod
-      ? (window.XashCore ? window.XashCore.sanitizeDirName(files.mod.root) : (isCS ? 'cstrike_mod' : 'valve_mod'))
-      : null;
-
-    // ТРЕБОВАНИЕ 3: передача реальных стартовых параметров запуска
-    const args = getLaunchArguments(game.id, modRoot);
-    if (window.Module) {
-      window.Module['arguments'] = args;
-      window.Module['canvas'] = canvasEl;
+    if (engine.status === 'running') {
+      throw new Error('движок уже запущен — перезагрузите страницу для новой игры');
     }
 
-    // ТРЕБОВАНИЕ 1 & 2: Гарантируем, что все файлы смонтированы в Module.FS
-    syncCacheToFS(window.Module && window.Module.FS);
+    /* 1. ядро: var Module + /xash.html.mem + /xash.js + /server.js + /client.js + /menu.js */
+    await ensureEngineLoaded({ showOverlay: true });
 
-    let contextCaptured = false;
-    const captureContext = () => {
-      if (contextCaptured) return;
-      contextCaptured = true;
+    const FS = engine.FS;
+    if (!FS) throw new Error('Module.FS недоступна');
 
-      // ТРЕБОВАНИЕ 4: Плавно скрываем меню
-      switchScreen(menuScreen, gameScreen);
+    /* 2. каталог игры и cwd движка */
+    const gameDir = game.primary === 'cstrike' ? 'cstrike' : 'valve';
+    const modDir = files.mod ? modDirName(files.mod) : null;
+    bootStepText('подготовка /xash …', 78);
+    setupEngineFS(FS, gameDir);
+    if (modDir) ensureFSDirectory(FS, `${ENGINE_ROOT}/${modDir}`);
 
-      // Разворачиваем <canvas id="canvas"> на весь экран
-      canvasEl.style.width = '100vw';
-      canvasEl.style.height = '100vh';
-      const dpr = window.devicePixelRatio || 1;
-      canvasEl.width = Math.round(window.innerWidth * dpr);
-      canvasEl.height = Math.round(window.innerHeight * dpr);
-      try { canvasEl.focus({ preventScroll: true }); } catch (_) {}
+    /* 3. ТРЕБОВАНИЕ 3: побайтовая запись распакованных файлов в ФС Emscripten */
+    bootStepText('монтирование файлов в Module.FS …', 82);
+    let mounted = mountCachedToEngineFS((pct, i, n) => {
+      bootStepText(`Module.FS.createDataFile: ${i} из ${n}`, 82 + Math.round(pct * 0.1));
+    });
+    if (!mounted) mounted = { count: 0, bytes: 0, failed: 0 };
 
-      // Передаём управление мышью (Pointer Lock API)
-      try {
-        const p = canvasEl.requestPointerLock();
-        if (p && p.catch) p.catch(() => {});
-      } catch (_) {}
+    /* файлы, распакованные до загрузки ядра, уже в ФС — проверяем каталог игры */
+    const gameDirPath = `${ENGINE_ROOT}/${gameDir}`;
+    const dirFiles = countFilesIn(FS, gameDirPath);
+    if (modDir && files.mod) {
+      ensureModGameInfo(FS, modDir, files.mod.root || modDir);
+    }
+    bootLine(`FS: ${dirFiles} файлов в ${gameDirPath}${modDir ? ` · мод ${ENGINE_ROOT}/${modDir}` : ''}`);
+    if (dirFiles === 0 && gameDirPath === `${ENGINE_ROOT}/cstrike`) {
+      bootLine('ВНИМАНИЕ: каталог cstrike пуст — проверьте архив мобильного кэша', 'err');
+    }
 
-      // Запуск сессии отображения и игрового HUD
-      enterGameSession(game, {
-        title: game.title,
-        argv: args,
-        fileCount: mountedFilesCache.size,
-      }, {
-        FS: window.Module && window.Module.FS,
-        gpu: window.XashCore ? window.XashCore.probeGL() : { kind: 'webgl', renderer: 'WebGL' },
-        realCore: true,
-      });
-    };
+    /* 4. ТРЕБОВАНИЕ 4: аргументы и сетевая часть */
+    const args = buildEngineArguments(game.id, modDir, {
+      width: window.innerWidth, height: window.innerHeight,
+    });
+    window.Module.canvas = canvasEl;
+    window.Module['arguments'] = args;
+    if (window.Module.ENV) {
+      window.Module.ENV.XASH3D_BASEDIR = ENGINE_ROOT;
+      window.Module.ENV.XASH3D_GAMEDIR = modDir || gameDir;
+    }
+    window.Module.websocket = window.Module.websocket || [];
+    window.Module.websocket.url = websocketProxyUrl(window.location.host);
 
-    // Перехват захвата контекста WebGL холстом
-    const origGetContext = canvasEl.getContext.bind(canvasEl);
-    canvasEl.getContext = function (type, attrs) {
-      const gl = origGetContext(type, attrs);
-      if (gl && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
-        captureContext();
-      }
-      return gl;
-    };
-    canvasEl.addEventListener('webglcontextrestored', captureContext, { once: true });
+    /* 5. показываем холст и только потом запускаем main() */
+    switchScreen(menuScreen, gameScreen);
+    await new Promise((r) => setTimeout(r, 420));
+    enterGameSession(game, { title: game.title, argv: args, mounted, dirFiles });
 
-    // Инициализация самого движка (Module.run() или старт xash.js)
+    bootStepText('Module.run() → main(): движок рисует игру на <canvas id="canvas">', 96);
+    bootLine(`Module['arguments'] = ${JSON.stringify(args)}`);
     try {
-      if (window.XashCore && typeof window.XashCore.loadRealGlue === 'function') {
-        window.XashCore.loadRealGlue({ timeoutMs: 15000 })
-          .then((glue) => {
-            if (glue && glue.FS) syncCacheToFS(glue.FS);
-            if (window.Module && typeof window.Module.run === 'function' && !window.Module.calledRun) {
-              try { window.Module.run(args); } catch (_) {}
-            }
-            captureContext();
-          })
-          .catch(() => {
-            if (window.Module && typeof window.Module.run === 'function' && !window.Module.calledRun) {
-              try { window.Module.run(args); } catch (_) {}
-            }
-            captureContext();
-          });
-      } else if (window.Module && typeof window.Module.run === 'function') {
-        window.Module.run(args);
-        captureContext();
+      resumeEngineRun(window, engine.savedRun, args);
+      engine.status = 'running';
+    } catch (err) {
+      const msg = String((err && (err.message || err)) || '');
+      if (/SimulateInfiniteLoop/.test(msg)) {
+        engine.status = 'running';       // штатный unwind mainloop Emscripten
       } else {
-        captureContext();
+        engine.status = 'error';
+        engine.error = msg;
+        bootLine('main() аварийно остановился: ' + msg.slice(0, 300), 'err');
+        toggleEngineConsole(true);
+        bootShow(true);
+        throw new Error('движок остановился при старте: ' + msg.slice(0, 180));
       }
-    } catch (e) {
-      console.warn('Engine init warning:', e);
-      captureContext();
     }
-
-    // Мягкий таймер перехода к холсту, если движок уже инициализировался
-    setTimeout(captureContext, 160);
+    bootShow(false);
+    refreshMenuStatus();
   }
 
-  /* ═══════════════ ИГРОВАЯ СЕССИЯ (canvas на весь экран) ═══════════════ */
+  /* Фатал ядра (Host_Error/abort) — показываем консоль движка с настоящей причиной */
+  function noteEngineFatal(text) {
+    if (engine.status !== 'running') return;
+    if (/Host_Error|abort\(|Could not load|Can't (open|find|init)|Sys_Error|FATAL/i.test(String(text))) {
+      toggleEngineConsole(true);
+      toast('Движок сообщил об ошибке — смотрите консоль (клавиша `)', 'err', 7000);
+    }
+  }
+
+  /** Каталог мода: свой gamedir, если корень архива не valve/cstrike */
+  function modDirName(set) {
+    const root = String((set && set.root) || '').toLowerCase();
+    if (!root || KNOWN_GAME_DIRS.includes(root)) return null;
+    return sanitizeDirName(root);
+  }
+
+  /** Проверка «это каталог» в настоящей ФС Emscripten (mode/analyzePath) */
+  function isFsDir(FS, p) {
+    try {
+      if (typeof FS.stat === 'function' && typeof FS.isDir === 'function') {
+        return FS.isDir(FS.stat(p).mode);
+      }
+    } catch (_) {}
+    try {
+      const a = typeof FS.analyzePath === 'function' ? FS.analyzePath(p) : null;
+      if (a && a.object) return a.object.type === 'directory' || a.object.isFolder === true;
+    } catch (_) {}
+    return false;
+  }
+
+  function countFilesIn(FS, dir, depth = 0) {
+    let n = 0;
+    if (depth > 8) return 0;
+    let entries = [];
+    try { entries = FS.readdir(dir) || []; } catch (_) { return 0; }
+    for (const name of entries) {
+      if (name === '.' || name === '..') continue;
+      const p = `${dir}/${name}`;
+      if (isFsDir(FS, p)) n += countFilesIn(FS, p, depth + 1);
+      else n++;
+    }
+    return n;
+  }
+
+  /* ═══════════ ИГРОВАЯ СЕССИЯ: холст движка на весь экран ═══════════ */
   let session = null;
 
-  function enterGameSession(game, info, ctx) {
-    if (session) {
-      if (session.fpsTimer) clearInterval(session.fpsTimer);
-      if (session.renderer && typeof session.renderer.stop === 'function') {
-        session.renderer.stop();
-      }
-      session = null;
-    }
-
-    const FS = ctx.FS || (window.Module && window.Module.FS);
-    // имена ресурсов — реальное содержимое Module.FS (createDataFile)
-    const names = (window.XashCore && FS) ? window.XashCore.collectResourceNames(FS, '/xash', 320) : [];
-    const renderer = window.XashCore ? window.XashCore.startRenderLoop(canvasEl, { names }) : null;
+  function enterGameSession(game, info) {
+    if (session) { stopSession(); }
 
     $('#hud-title').textContent = info.title || game.title;
     $('#hud-args').textContent =
-      `argv: ${info.argv.join(' ')} · ${info.title || game.title} · fs: ${info.fileCount || mountedFilesCache.size} файлов`;
+      `argv: ${info.argv.join(' ')} · ${ENGINE_ROOT}/${game.primary || 'valve'} · ${info.dirFiles} файлов в ФС движка`;
     $('#hud-fps').textContent = '— fps';
 
-    session = { renderer };
-    if (renderer) {
-      session.fpsTimer = setInterval(() => {
-        if (session && session.renderer) {
-          $('#hud-fps').textContent = `${session.renderer.fps || 60} fps · xash-core`;
-        }
-      }, 500);
-    }
+    session = { fpsTimer: null, rafWrapped: false };
+    startEngineFrameMeter();
 
-    switchScreen(menuScreen, gameScreen);
     setTimeout(() => {
       try { canvasEl.focus({ preventScroll: true }); } catch (_) {}
-      try {
-        const p = canvasEl.requestPointerLock();
-        if (p && p.catch) p.catch(() => {});
-      } catch (_) {}
-    }, 200);
+      requestPointerLock();
+    }, 260);
 
-    toast(`Движок онлайн: «${info.title || game.title}»`, 'ok', 4200);
+    toast(`Движок Xash3D запущен: «${info.title || game.title}»`, 'ok', 4200);
+    toggleEngineConsole(false);
+  }
+
+  /* Счётчик кадров основного цикла движка (ничего не рисуем — только считаем
+     вызовы requestAnimationFrame, которыми mainloop ядра обновляет кадр) */
+  function startEngineFrameMeter() {
+    if (!session || session.fpsTimer) return;
+    if (!session.rafWrapped) {
+      const origRaf = window.requestAnimationFrame.bind(window);
+      session.frames = 0;
+      window.requestAnimationFrame = function (cb) {
+        return origRaf(function (t) { session.frames = (session.frames || 0) + 1; return cb(t); });
+      };
+      session.rafWrapped = true;
+    }
+    let last = performance.now();
+    let lastFrames = session.frames || 0;
+    session.fpsTimer = setInterval(() => {
+      const now = performance.now();
+      const frames = session ? (session.frames || 0) : 0;
+      const fps = Math.round(((frames - lastFrames) * 1000) / Math.max(1, now - last));
+      lastFrames = frames; last = now;
+      const el = $('#hud-fps');
+      if (el) el.textContent = `${fps} fps · mainloop движка`;
+    }, 1000);
+  }
+
+  function stopSession() {
+    if (!session) return;
+    if (session.fpsTimer) clearInterval(session.fpsTimer);
+    session = null;
+  }
+
+  function requestPointerLock() {
+    if (document.pointerLockElement === canvasEl) return;
+    try {
+      const p = canvasEl.requestPointerLock && canvasEl.requestPointerLock();
+      if (p && p.catch) p.catch(() => {});
+    } catch (_) {}
   }
 
   function exitGameSession() {
-    if (document.pointerLockElement) {
-      try { document.exitPointerLock(); } catch (_) {}
-    }
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    }
-    if (session) {
-      if (session.fpsTimer) clearInterval(session.fpsTimer);
-      if (session.renderer && typeof session.renderer.stop === 'function') {
-        session.renderer.stop();
-      }
-      session = null;
-    }
-    $('#hud-fps').textContent = '— fps';
-    switchScreen(gameScreen, menuScreen);
-    toast('Сессия движка завершена — файлы остаются в виртуальной FS', 'ok');
+    /* asm.js-ядро нельзя корректно остановить без перезагрузки страницы */
+    const overlay = html(`
+      <div class="overlay" id="overlay-exit">
+        <div class="modal modal--narrow" role="dialog" aria-modal="true" aria-label="Выход из игры">
+          <header class="modal__head">
+            <div>
+              <div class="modal__eyebrow">движок запущен</div>
+              <h3 class="modal__title">Выйти в меню?</h3>
+              <div class="modal__sub">Ядро Xash3D работает в адресном пространстве страницы: остановка возможна только перезагрузкой. Файлы кэша придётся выбрать заново.</div>
+            </div>
+            <button class="icon-btn modal__close" data-close aria-label="Закрыть">${I.x}</button>
+          </header>
+          <footer class="modal__foot">
+            <button class="btn btn--bracket" data-close>ОСТАТЬСЯ В ИГРЕ</button>
+            <button class="btn btn--bracket btn--danger" id="btn-reload">ПЕРЕЗАГРУЗИТЬ</button>
+          </footer>
+        </div>
+      </div>`);
+    mountOverlay(overlay);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) unmountOverlay(overlay); });
+    overlay.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => unmountOverlay(overlay)));
+    $('#btn-reload', overlay).addEventListener('click', () => window.location.reload());
   }
 
   /* ── глобальные обработчики ─────────────────────────────────── */
@@ -1142,33 +1643,33 @@ export {
       }
       if (e.key === 'Escape') {
         const overlays = modalRoot.querySelectorAll('.overlay');
-        if (!overlays.length) return;
-        const top = overlays[overlays.length - 1];
-        unmountOverlay(top);
+        if (overlays.length) { unmountOverlay(overlays[overlays.length - 1]); return; }
+        if (engineConsole && engineConsole.classList.contains('is-open')) toggleEngineConsole(false);
+      }
+      if (e.key === '`' || e.key === '~' || e.key === 'ё' || e.key === 'Ё') {
+        if (gameScreen.classList.contains('is-active')) toggleEngineConsole();
       }
     });
 
     $('#btn-exit').addEventListener('click', () => switchScreen(menuScreen, splashScreen));
 
-    /* HUD: мышь / полный экран / выход */
+    /* HUD: консоль движка / мышь / полный экран / выход */
+    const hudConsole = $('#hud-console');
     const hudPointer = $('#hud-pointer');
     const hudFull    = $('#hud-full');
     const hudExit    = $('#hud-exit');
 
-    const requestLock = () => {
-      if (document.pointerLockElement === canvasEl) return;
-      try {
-        const p = canvasEl.requestPointerLock();
-        if (p && p.catch) p.catch(() => toast('Браузер отклонил захват мыши', 'warn'));
-      } catch (err) { toast('Захват мыши не поддерживается', 'warn'); }
-    };
+    if (hudConsole) hudConsole.addEventListener('click', () => toggleEngineConsole());
+    const consoleClose = $('#engine-console-close');
+    if (consoleClose) consoleClose.addEventListener('click', () => toggleEngineConsole(false));
+
     hudPointer.addEventListener('click', () => {
       if (!gameScreen.classList.contains('is-active')) return;
       if (document.pointerLockElement === canvasEl) document.exitPointerLock();
-      else requestLock();
+      else requestPointerLock();
     });
     canvasEl.addEventListener('click', () => {
-      if (gameScreen.classList.contains('is-active')) requestLock();
+      if (gameScreen.classList.contains('is-active')) requestPointerLock();
     });
     document.addEventListener('pointerlockchange', () => {
       const on = document.pointerLockElement === canvasEl;
@@ -1192,10 +1693,29 @@ export {
 
     document.addEventListener('dragover', (e) => e.preventDefault());
     document.addEventListener('drop', (e) => e.preventDefault());
+
+    /* ошибки ядра движка — честно показываем пользователю */
+    window.addEventListener('error', (e) => {
+      const msg = (e && (e.message || (e.error && e.error.message))) || '';
+      if (!msg) return;
+      if (/SimulateInfiniteLoop/.test(msg)) return;      // штатный unwind mainloop
+      bootLine('window.onerror: ' + msg, 'err');
+      if (engine.status !== 'running') {
+        engine.status = 'error';
+        engine.error = msg;
+        bootShow(true);
+        bootStepText('ошибка ядра: ' + msg, 100);
+      }
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      const msg = String((e && e.reason && (e.reason.message || e.reason)) || '');
+      if (msg) bootLine('unhandledrejection: ' + msg, 'err');
+    });
   }
 
-  /* ── инициализация ──────────────────────────────────────────── */
+  /* ── инициализация портала ──────────────────────────────────── */
   renderCards();
   bindGlobal();
-
+  refreshMenuStatus();
+  bootLine(`портал готов · цепочка ядра: ${ENGINE_SCRIPTS.join(' → ')} · ${ENGINE_MEMORY_INITIALIZER}`);
 })();

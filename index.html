@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#05070d" />
   <title>Hash Online — загрузите файлы игры и играйте</title>
-  <meta name="description" content="Hash Online — кроссплатформенный игровой портал на движке «Ха-кэш». Загрузите мобильный кэш игры и играйте прямо в браузере." />
+  <meta name="description" content="Hash Online — браузерный портал на настоящем движке Xash3D FWGS (Emscripten/asm.js). Загрузите мобильный кэш игры и играйте прямо в браузере." />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2305070d'/%3E%3Cpath d='M12 6v20M20 6v20M7 12h18M7 20h18' stroke='%2300ffc8' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -25,7 +25,7 @@
   <!-- ═══════════════ ЭКРАН 1 · ЗАСТАВКА ═══════════════ -->
   <section id="screen-splash" class="screen screen--splash is-active" aria-label="Заставка">
     <div class="splash">
-      <div class="splash__eyebrow">ДВИЖОК «ХА-КЭШ» · WEB&nbsp;EDITION</div>
+      <div class="splash__eyebrow">ДВИЖОК XASH3D FWGS · WEB&nbsp;EDITION</div>
 
       <h1 class="logo" aria-label="Hash Online">
         <span class="logo__a">HASH</span>
@@ -37,14 +37,14 @@
       <button id="btn-start" class="btn btn--bracket btn--xl">НАЧАТЬ</button>
 
       <div class="splash__meta">
-        <span>движок «Ха-кэш»</span><i></i>
+        <span>xash.js · asm.js</span><i></i>
         <span>кроссплатформа</span><i></i>
         <span>мобильный&nbsp;кэш&nbsp;·&nbsp;.zip</span>
       </div>
 
       <div class="splash__kbd">нажмите <kbd>Enter</kbd> для продолжения</div>
     </div>
-    <div class="screen-version">hash-online · portal v1.4.0 · real core</div>
+    <div class="screen-version">hash-online · portal v2.0.0 · real xash3d core</div>
   </section>
 
   <!-- ═══════════════ ЭКРАН 2 · ГЛАВНОЕ МЕНЮ ═══════════════ -->
@@ -59,7 +59,7 @@
 
       <div class="menu__title">
         <h2>Выберите игровую платформу</h2>
-        <p>Мобильный кэш игры монтируется в виртуальную файловую систему движка «Ха-кэш»</p>
+        <p>Мобильный кэш игры побайтово монтируется в виртуальную файловую систему Emscripten (<code>Module.FS</code>) настоящего движка Xash3D</p>
       </div>
 
       <!-- Основная плитка: турнирная игра, сюжетная игра и кнопка [ ЕЩЁ ] -->
@@ -77,14 +77,15 @@
 
       <footer class="menu__foot">
         <span id="menu-status" class="menu-status"><i class="dot"></i><span class="menu-status__text">библиотека пуста — загрузите файлы игры</span></span>
-        <span class="menu__build">xa-cache // fx-mod · glue /xash.js · memfs-mount</span>
+        <span class="menu__build">xash3d fwgs // xash.js + server.js + client.js + menu.js · memfs-mount</span>
       </footer>
     </div>
   </section>
 
   <!-- ═══════════════ ЭКРАН 3 · ИГРОВОЙ ХОЛСТ (канвас движка) ═══════════════ -->
   <section id="screen-game" class="screen screen--game" aria-label="Игровой холст" aria-hidden="true">
-    <canvas id="canvas" tabindex="0" aria-label="Игровой рендер движка Ха-кэш"></canvas>
+    <!-- Единственный холст: его получает Emscripten (Module.canvas), рисует движок -->
+    <canvas id="canvas" tabindex="0" aria-label="Игровой холст движка Xash3D" oncontextmenu="event.preventDefault()"></canvas>
 
     <div class="game-hud">
       <div class="game-hud__left">
@@ -93,15 +94,35 @@
       </div>
       <div class="game-hud__right">
         <span class="hud-chip" id="hud-fps">— fps</span>
+        <button class="hud-btn" id="hud-console" type="button">КОНСОЛЬ ДВИЖКА</button>
         <button class="hud-btn" id="hud-pointer" type="button">ЗАХВАТ МЫШИ</button>
         <button class="hud-btn" id="hud-full" type="button">ВО ВЕСЬ ЭКРАН</button>
         <button class="hud-btn hud-btn--danger" id="hud-exit" type="button">В МЕНЮ</button>
       </div>
     </div>
 
+    <!-- Реальный вывод Module.print / Module.printErr ядра Xash3D -->
+    <div class="engine-console" id="engine-console" aria-label="Консоль движка">
+      <div class="engine-console__head">
+        <span>xash3d fwgs · emscripten-javascript · вывод Module.print</span>
+        <button class="engine-console__close" id="engine-console-close" type="button" aria-label="Скрыть консоль">✕</button>
+      </div>
+      <pre class="engine-console__log" id="engine-console-log"></pre>
+    </div>
+
     <div class="game-args" id="hud-args"></div>
-    <div class="game-hint">Esc — освободить мышь · клик по холсту — захват управления</div>
+    <div class="game-hint">Esc — освободить мышь · ` — консоль движка · клик по холсту — захват управления</div>
   </section>
+
+  <!-- Оверлей инициализации ядра: честный прогресс загрузки xash.js и монтирования ФС -->
+  <div class="boot-overlay" id="boot-overlay" aria-hidden="true" aria-live="polite">
+    <div class="boot-card">
+      <div class="boot-title">ИНИЦИАЛИЗАЦИЯ ДВИЖКА XASH3D</div>
+      <div class="boot-step" id="boot-step">—</div>
+      <div class="progress"><div class="progress__fill" id="boot-bar" style="width:0%"></div></div>
+      <pre class="boot-log" id="boot-log"></pre>
+    </div>
+  </div>
 
   <!-- Сюда скрипт монтирует модальные окна -->
   <div id="modal-root"></div>
@@ -109,11 +130,11 @@
   <!-- Уведомления -->
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
-  <!-- Кит совместимости «Ха-кэш»: var Module + Module.FS-эмулятор + рендер;
-       настоящий glue двигателя подгружается лениво из корня: /xash.js -->
-  <script src="/engine/xash.js"></script>
   <!-- Локальная копия JSZip (умная распаковка мобильного кэша) -->
   <script src="/vendor/jszip.min.js"></script>
+  <!-- Ядро движка (/xash.js, /xash.html.mem, /server.js, /client.js, /menu.js)
+       подключает app.js динамически — сначала настраивается глобальный
+       `var Module = { … }`, затем скрипты оригинального порта Xash3D -->
   <script type="module" src="/app.js"></script>
 </body>
 </html>
