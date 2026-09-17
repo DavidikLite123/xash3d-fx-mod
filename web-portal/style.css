@@ -853,11 +853,24 @@ body.extra-open .more-plus { transform: rotate(45deg); }
 /* ═══ ЭКРАН 3 · ИГРОВОЙ ХОЛСТ (канвас движка «Ха-кэш») ═════════ */
 .screen--game { background: #000; }
 
-#game-canvas {
+#canvas {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
   display: block; outline: none;
   cursor: crosshair;
+}
+
+/* проецируемые лейблы реальных имён ресурсов из Module.FS */
+.res-labels {
+  position: absolute; z-index: 4; top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none; overflow: hidden;
+}
+.res-label {
+  position: absolute; top: 0; left: 0;
+  font-size: 10px; letter-spacing: .06em; white-space: nowrap;
+  color: rgba(0, 255, 200, .85);
+  text-shadow: 0 0 10px rgba(0, 255, 200, .5);
+  will-change: transform, opacity;
 }
 
 .game-hud {

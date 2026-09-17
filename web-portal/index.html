@@ -44,7 +44,7 @@
 
       <div class="splash__kbd">нажмите <kbd>Enter</kbd> для продолжения</div>
     </div>
-    <div class="screen-version">hash-online · portal v1.2.0 · local core</div>
+    <div class="screen-version">hash-online · portal v1.3.0 · local core</div>
   </section>
 
   <!-- ═══════════════ ЭКРАН 2 · ГЛАВНОЕ МЕНЮ ═══════════════ -->
@@ -84,7 +84,7 @@
 
   <!-- ═══════════════ ЭКРАН 3 · ИГРОВОЙ ХОЛСТ (канвас движка) ═══════════════ -->
   <section id="screen-game" class="screen screen--game" aria-label="Игровой холст" aria-hidden="true">
-    <canvas id="game-canvas" tabindex="0" aria-label="Игровой рендер движка Ха-кэш"></canvas>
+    <canvas id="canvas" tabindex="0" aria-label="Игровой рендер движка Ха-кэш"></canvas>
 
     <div class="game-hud">
       <div class="game-hud__left">
@@ -109,9 +109,7 @@
   <!-- Уведомления -->
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
-  <!-- Локальное ядро «Ха-кэш» (VFS → Module → core) -->
-  <script src="engine/vfs.js"></script>
-  <script src="engine/module.js"></script>
+  <!-- Локальное ядро «Ха-кэш»: var Module + Module.FS + JS-core -->
   <script src="engine/xash.js"></script>
   <!-- Локальная копия JSZip (умная распаковка мобильного кэша) -->
   <script src="vendor/jszip.min.js"></script>
