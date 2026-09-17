@@ -2,13 +2,12 @@
    HASH ONLINE · фронтенд-портал для движка «Ха-кэш»
    Кроссплатформенный браузерный клиент (десктоп / мобильные)
 
-   Модули: toast → screens → cards → files (папки + умный .zip) →
-           game-modal (динамические зоны + подсказки-ссылки) →
-           engine-modal (boot-последовательность)
+   Теперь с боевым ядром: engine/vfs.js (Emscripten-FS-совместимая
+   виртуальная ФС) + engine/module.js (конфигурация Module) +
+   engine/xash.js (локальное ядро: честный boot, индексация,
+   CRC32, liblist.gam, WebGL-рендер на полноэкранном canvas).
 
    Интерфейс работает в тишине: синтезированных звуков нет.
-   Звук можно подключить позже штатными HTML5 <audio>-тегами,
-   когда в проекте появятся реальные аудиофайлы.
    ════════════════════════════════════════════════════════════════ */
 'use strict';
 
@@ -98,10 +97,7 @@
 
   const gameById = (id) => GAMES.find((g) => g.id === id);
 
-  /* ── подсказки «где взять файлы» (только легальные источники) ──
-     Для игр — официальные страницы + инструкция сборки кэша из
-     собственной копии. Для модов — свободно распространяемые
-     модификации и хабы сообществ. Все ссылки — target="_blank". */
+  /* ── подсказки «где взять файлы» (только легальные источники) ── */
   const LINKS = {
     cs: {
       where: {
@@ -114,7 +110,7 @@
         ],
       },
       mods: {
-        note: 'Бесплатные модификации, совместимые с движком «Ха-кэш»: скачайте .zip и загрузите в поле «Файлы мода» — содержимое наложится поверх оригинального кэша.',
+        note: 'Бесплатные модификации, совместимые с движком «Ха-кэш»: скачайте .zip и загрузите в поле «Файлы мода» — содержимое наложится в памяти поверх оригинального кэша.',
         links: [
           { host: 'gamebanana.com', title: 'GameBanana — хаб CS 1.6',
             url: 'https://gamebanana.com/games/4254', desc: 'тысячи карт, моделей и скинов от сообщества' },
@@ -134,7 +130,7 @@
         ],
       },
       mods: {
-        note: 'Бесплатные модификации, совместимые с движком «Ха-кэш»: скачайте .zip и загрузите в поле «Файлы мода» — содержимое наложится поверх оригинального кэша.',
+        note: 'Бесплатные модификации, совместимые с движком «Ха-кэш»: скачайте .zip и загрузите в поле «Файлы мода» — содержимое наложится в памяти поверх оригинального кэша.',
         links: [
           { host: 'moddb.com', title: 'Модификации Half-Life на ModDB',
             url: 'https://www.moddb.com/games/half-life/mods', desc: 'крупнейшая библиотека модов' },
@@ -172,11 +168,29 @@
       if (!segs.length) { skipped++; continue; }
       if (!targets) { picked.push({ name, rel: segs.join('/') }); continue; }
       const idx = segs.findIndex((s) => targets.includes(s.toLowerCase()));
-      // целевая папка найдена И внутри неё есть хотя бы один файл
       if (idx === -1 || idx === segs.length - 1) { skipped++; continue; }
       picked.push({ name, rel: segs.slice(idx).join('/') });
     }
     return { picked, skipped };
+  }
+
+  function makeFileSet(items) {
+    items.sort((a, b) => a.path.localeCompare(b.path, 'ru'));
+    const size = items.reduce((s, it) => s + it.size, 0);
+    const roots = new Set(items.map((it) => it.path.split('/')[0]));
+    const byExt = new Map();
+    for (const it of items) {
+      const m = /\.([a-z0-9]{1,8})$/i.exec(it.path);
+      const ext = m ? m[1].toLowerCase() : '—';
+      byExt.set(ext, (byExt.get(ext) || 0) + 1);
+    }
+    return {
+      items,
+      count: items.length,
+      size,
+      root: roots.size === 1 ? [...roots][0] : null,
+      byExt,
+    };
   }
 
   /* Последовательная распаковка с динамическим прогрессом по байтам.
@@ -184,9 +198,8 @@
   async function extractZipSet(zip, targets, onProgress) {
     const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir && !isJunkPath(n));
     const { picked, skipped } = pickZipTargets(names, targets);
-    if (targets && !picked.length) return { set: null, skipped }; // целевая папка не найдена
+    if (targets && !picked.length) return { set: null, skipped };
 
-    // суммарный объём распаковки для точных процентов
     const sizes = picked.map((p) => {
       const d = zip.files[p.name]._data;
       return (d && d.uncompressedSize > 0) ? d.uncompressedSize : 0;
@@ -260,9 +273,7 @@
 
   const isGameReady = (g) => {
     const fs = libEntry(g.id);
-    return g.kind === 'modified'
-      ? !!(fs.game && fs.mod)
-      : !!fs.game;
+    return g.kind === 'modified' ? !!(fs.game && fs.mod) : !!fs.game;
   };
 
   /* ── уведомления ────────────────────────────────────────────── */
@@ -278,9 +289,11 @@
     note.addEventListener('click', kill);
   }
 
-  /* ── переключение экранов ───────────────────────────────────── */
+  /* ── экраны ─────────────────────────────────────────────────── */
   const splashScreen = $('#screen-splash');
   const menuScreen   = $('#screen-menu');
+  const gameScreen   = $('#screen-game');
+  const canvasEl     = $('#game-canvas');
 
   function switchScreen(from, to) {
     from.classList.remove('is-active');
@@ -318,7 +331,6 @@
 
     for (const g of GAMES.filter((x) => x.place === 'main')) mainGrid.appendChild(cardTpl(g));
 
-    // плитка [ ЕЩЁ ] — рядом с основными карточками
     mainGrid.appendChild(html(`
       <button class="game-card game-card--more" id="btn-more" aria-expanded="false" aria-controls="extra-wrap">
         <span class="game-card__scan"></span>
@@ -329,7 +341,6 @@
 
     for (const g of GAMES.filter((x) => x.place === 'extra')) extraGrid.appendChild(cardTpl(g));
 
-    // события карточек
     document.querySelectorAll('.game-card[data-id]').forEach((card) => {
       const g = gameById(card.dataset.id);
       const activate = () => {
@@ -394,39 +405,10 @@
       : 'библиотека пуста — загрузите файлы игры';
   }
 
-  /* ═══════════════ РАБОТА С ФАЙЛАМИ ═══════════════
-     FileSet = { items:[{file,path,size}], count, size, root, byExt } */
+  /* ═══════════════ РАБОТА С ФАЙЛАМИ (папки через дроп) ═══════════════ */
 
-  function makeFileSet(items) {
-    items.sort((a, b) => a.path.localeCompare(b.path, 'ru'));
-    const size = items.reduce((s, it) => s + it.size, 0);
-    const roots = new Set(items.map((it) => it.path.split('/')[0]));
-    const byExt = new Map();
-    for (const it of items) {
-      const m = /\.([a-z0-9]{1,8})$/i.exec(it.path);
-      const ext = m ? m[1].toLowerCase() : '—';
-      byExt.set(ext, (byExt.get(ext) || 0) + 1);
-    }
-    return {
-      items,
-      count: items.length,
-      size,
-      root: roots.size === 1 ? [...roots][0] : null,
-      byExt,
-    };
-  }
-
-  // выбор через системный диалог (папка целиком)
-  function filesFromInput(fileList) {
-    const items = [...fileList].map((f) => ({
-      file: f,
-      path: f.webkitRelativePath || f.name,
-      size: f.size,
-    }));
-    return makeFileSet(items);
-  }
-
-  // рекурсивный обход перетаскиваемых директорий (Chromium FileSystemEntry API)
+  // рекурсивный обход перетаскиваемых директорий (Chromium FileSystemEntry API,
+  // работает и в Linux-сборках браузеров через event.dataTransfer)
   async function readDropped(dt) {
     const entries = [...(dt.items || [])]
       .filter((i) => i.kind === 'file')
@@ -434,7 +416,6 @@
       .filter(Boolean);
 
     if (!entries.length) {
-      // запасной путь: плоский список файлов
       return makeFileSet([...dt.files].map((f) => ({ file: f, path: f.name, size: f.size })));
     }
 
@@ -464,6 +445,29 @@
         resolve();
       }
     });
+  }
+
+  /* ── Инпуты (Linux-safe): папки и .zip строго разделены ────────
+     Смешение accept + webkitdirectory на одном <input> ломает
+     файловый диалог в Linux (GTK/KDE порталы), поэтому два инпута. */
+  function makePicker(kind, onPick) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.className = 'visually-hidden';
+    input.multiple = true;
+    if (kind === 'dir') {
+      // выбор папки целиком — обе вариации атрибута, без accept
+      input.setAttribute('webkitdirectory', '');
+      input.setAttribute('directory', '');
+      try { input.webkitdirectory = true; } catch (e) { /* старые движки */ }
+    } else {
+      // обычный мультивыбор файлов, только .zip
+      input.setAttribute('accept', '.zip,application/zip,application/x-zip-compressed');
+    }
+    input.addEventListener('change', () => {
+      try { onPick(input.files); } finally { input.value = ''; }
+    });
+    return input;
   }
 
   /* ═══════════════ МОДАЛЬНЫЕ ОКНА (general) ═══════════════ */
@@ -517,9 +521,7 @@
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
     $('[data-close]', overlay).addEventListener('click', close);
 
-    /* ── динамический состав окна:
-          обычная игра     → одна зона [ Загрузить файлы игры ]
-          модифицированная → + вторая зона [ Загрузить файлы мода ] ── */
+    /* ── динамический состав окна ── */
     const zoneDefs = [{ key: 'game', label: 'Загрузить файлы игры',
       hint: `папка мобильного кэша — <b>${game.expect[0]}/</b> · или .zip архив целиком<br>
              перетащите сюда, нажмите для выбора папки или
@@ -527,10 +529,9 @@
     if (game.kind === 'modified') {
       zoneDefs.push({ key: 'mod', label: 'Загрузить файлы мода',
         hint: `ресурсы модификации — модели, текстуры, спрайты<br>
-               папка или .zip архив мода · накладывается поверх кэша игры` });
+               папка или .zip архив мода · накладывается в памяти поверх кэша игры` });
     }
 
-    // порядок: зона игры → подсказка «где скачать» → (зона мода → каталог)
     zonesBox.appendChild(buildZone(zoneDefs[0]));
     zonesBox.appendChild(buildLinksBlock('where', links.where));
     if (zoneDefs[1]) {
@@ -538,7 +539,6 @@
       zonesBox.appendChild(buildLinksBlock('mods', links.mods));
     }
 
-    /* блоки-подсказки со ссылками (плавное раскрытие) */
     function buildLinksBlock(type, cfg) {
       const isWhere = type === 'where';
       const block = html(`
@@ -582,34 +582,18 @@
           <div class="upzone__content"></div>
         </div>`);
 
-      // системный выбор папки
-      const dirInput = document.createElement('input');
-      dirInput.type = 'file';
-      dirInput.multiple = true;
-      dirInput.className = 'visually-hidden';
-      dirInput.setAttribute('webkitdirectory', '');
-      dirInput.webkitdirectory = true;
-      zone.appendChild(dirInput);
-
-      // отдельный скрытый input под .zip архивы
-      const zipInput = document.createElement('input');
-      zipInput.type = 'file';
-      zipInput.accept = '.zip,application/zip,application/x-zip-compressed';
-      zipInput.className = 'visually-hidden';
-      zone.appendChild(zipInput);
-
-      dirInput.addEventListener('change', () => {
-        if (!dirInput.files.length) return;
-        acceptFiles(zd.key, filesFromInput(dirInput.files));
-        dirInput.value = ''; // позволяет выбрать ту же папку повторно
+      // два раздельных Linux-safe инпута
+      const dirInput = makePicker('dir', (list) => {
+        const items = [...list].map((f) => ({ file: f, path: f.webkitRelativePath || f.name, size: f.size }));
+        if (items.length) acceptFiles(zd.key, makeFileSet(items));
       });
-      zipInput.addEventListener('change', () => {
-        if (!zipInput.files.length) return;
-        handleZip(zd.key, zipInput.files[0]);
-        zipInput.value = '';
+      const zipInput = makePicker('zip', (list) => {
+        if (list.length) handleZipList(zd.key, [...list]);
       });
+      zone.append(dirInput, zipInput);
 
       zone.addEventListener('click', (e) => {
+        if (zone.classList.contains('is-busy')) return;
         if (e.target.closest('.upzone__clear')) return;
         if (e.target.closest('.zip-trigger')) { zipInput.click(); return; }
         dirInput.click();
@@ -619,7 +603,6 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); dirInput.click(); }
       });
 
-      // drag & drop: папка — рекурсивный обход, одиночный .zip — распаковка
       zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('is-drag'); });
       zone.addEventListener('dragleave', (e) => {
         if (!zone.contains(e.relatedTarget)) zone.classList.remove('is-drag');
@@ -627,13 +610,21 @@
       zone.addEventListener('drop', async (e) => {
         e.preventDefault();
         zone.classList.remove('is-drag');
+        if (zone.classList.contains('is-busy')) return;
         try {
-          const dropped = [...(e.dataTransfer.files || [])];
-          if (dropped.length === 1 && /\.zip$/i.test(dropped[0].name)) {
-            await handleZip(zd.key, dropped[0]);
+          const dt = e.dataTransfer;
+          const files = [...(dt.files || [])];
+          const hasDir = [...(dt.items || [])].some((i) => {
+            const en = i.webkitGetAsEntry && i.webkitGetAsEntry();
+            return en && en.isDirectory;
+          });
+          const zips = files.filter((f) => /\.zip$/i.test(f.name));
+          if (!hasDir && zips.length) {
+            if (zips.length !== files.length) toast('Смешанный дроп: обработаны только .zip архивы', 'warn');
+            await handleZipList(zd.key, zips);
             return;
           }
-          const set = await readDropped(e.dataTransfer);
+          const set = await readDropped(dt);
           if (set.count) acceptFiles(zd.key, set);
           else toast('Перетащите папку с файлами игры или .zip архив', 'warn');
         } catch (err) {
@@ -645,8 +636,12 @@
       return zone;
     }
 
-    /* ── умная распаковка .zip любого размера ── */
-    async function handleZip(key, file) {
+    /* ── умная распаковка .zip (один или несколько архивов) ── */
+    async function handleZipList(key, files) {
+      const zips = files.filter((f) => /\.zip$/i.test(f.name));
+      if (!zips.length) { toast('Нужны архивы формата .zip', 'warn'); return; }
+      if (zips.length !== files.length) toast('Файлы не .zip пропущены', 'warn');
+
       const zone = $(`.upzone[data-zone="${key}"]`, overlay);
       const zd = zoneDefs.find((z) => z.key === key);
 
@@ -655,45 +650,56 @@
         return;
       }
 
-      renderZoneBusy(zone, file);
-      try {
-        const zip = await JSZip.loadAsync(file);
-        const targets = key === 'game' ? game.expect : null; // мод: оставляем всё
-        const { set, skipped } = await extractZipSet(zip, targets, (pct) => {
-          const bar = $('.zip-bar', zone);
-          const num = $('.zip-pct', zone);
-          if (bar) bar.style.width = `${pct}%`;
-          if (num) num.textContent = pct;
-        });
+      const merged = [];
+      let skipped = 0;
+      const multi = zips.length > 1;
 
-        zone.classList.remove('is-busy');
-
-        if (!set || !set.count) {
+      for (let i = 0; i < zips.length; i++) {
+        const f = zips[i];
+        const suffix = multi ? ` (${i + 1} из ${zips.length})` : '';
+        renderZoneBusy(zone, f, suffix);
+        try {
+          const zip = await JSZip.loadAsync(f);
+          const targets = key === 'game' ? game.expect : null; // мод: всё дерево
+          const res = await extractZipSet(zip, targets, (pct) => updateZoneProgress(zone, pct));
+          if (!res.set || !res.set.count) {
+            zone.classList.remove('is-busy');
+            renderZone(zone, zd, fs[key]);
+            toast('Ошибка: В архиве не найдена папка с файлами игры. Убедитесь, что загружаете правильный мобильный кэш', 'err', 6500);
+            return;
+          }
+          merged.push(...res.set.items);
+          skipped += res.skipped;
+        } catch (err) {
+          zone.classList.remove('is-busy');
           renderZone(zone, zd, fs[key]);
-          toast('Ошибка: В архиве не найдена папка с файлами игры. Убедитесь, что загружаете правильный мобильный кэш', 'err', 6500);
+          toast(`Ошибка: не удалось прочитать «${f.name}» — файл повреждён или это не zip`, 'err', 5000);
           return;
         }
+      }
 
-        acceptFiles(key, set);
-        if (skipped > 0) {
-          toast(`Лишних файлов вне целевой папки: ${skipped} — очищены из памяти`, 'info', 4200);
-        }
-      } catch (err) {
-        zone.classList.remove('is-busy');
-        renderZone(zone, zd, fs[key]);
-        toast('Ошибка: не удалось прочитать .zip-архив — файл повреждён или это не zip', 'err', 5000);
+      zone.classList.remove('is-busy');
+      acceptFiles(key, makeFileSet(merged));
+      if (skipped > 0) {
+        toast(`Лишних файлов вне целевой папки: ${skipped} — очищены из памяти`, 'info', 4200);
       }
     }
 
     /* прогресс распаковки внутри зоны: «Распаковка архива: X%…» */
-    function renderZoneBusy(zone, file) {
+    function renderZoneBusy(zone, file, suffix = '') {
       const box = $('.upzone__content', zone);
       zone.classList.add('is-busy');
       box.innerHTML = `
         <div class="upzone__icon">${I.zip}</div>
-        <div class="upzone__label"><span class="br">[</span>&nbsp;Распаковка архива: <b class="zip-pct">0</b>%&nbsp;<span class="br">]</span></div>
+        <div class="upzone__label"><span class="br">[</span>&nbsp;Распаковка архива${suffix}: <b class="zip-pct">0</b>%&nbsp;<span class="br">]</span></div>
         <div class="upzone__zipname"><b>${escapeHtml(file.name)}</b> · ${fmtBytes(file.size)}</div>
         <div class="progress progress--s"><div class="progress__fill zip-bar" style="width:0%"></div></div>`;
+    }
+    function updateZoneProgress(zone, pct) {
+      const bar = $('.zip-bar', zone);
+      const num = $('.zip-pct', zone);
+      if (bar) bar.style.width = `${pct}%`;
+      if (num) num.textContent = pct;
     }
 
     function renderZone(zone, zd, set) {
@@ -709,7 +715,6 @@
       zone.classList.remove('is-busy');
       zone.classList.add('is-filled');
 
-      // топ-4 типа ресурсов для чипов (по количеству файлов)
       const chips = [...set.byExt.entries()]
         .sort((a, b) => b[1] - a[1])
         .slice(0, 4)
@@ -732,7 +737,6 @@
       });
     }
 
-    // мягкая валидация: подсказываем, если папка не похожа на мобильный кэш
     function validateExpectation(key, set) {
       if (key !== 'game') return;
       const ok = set.items.some((it) =>
@@ -753,7 +757,6 @@
       toast(`${zd.label.replace('Загрузить ', 'Добавлено: ')} — ${filesLabel(set.count)}`, 'ok');
     }
 
-    // кнопка ЗАПУСТИТЬ активна только при заполненных зонах
     function updateLaunchState() {
       const missing = [];
       if (!fs.game) missing.push('файлы игры');
@@ -771,19 +774,27 @@
 
     btnLaunch.addEventListener('click', () => {
       unmountOverlay(overlay);
-      setTimeout(() => openEngineModal(game, { ...fs }), 300);
+      setTimeout(() => openEngineModal(game, { game: fs.game, mod: fs.mod }), 300);
     });
   }
 
   /* ═══════════════ ОКНО ИНИЦИАЛИЗАЦИИ ДВИЖКА «ХА-КЭШ» ═══════════════ */
   function openEngineModal(game, fs) {
+    // контекст запуска: каталоги монтирования и argv
+    const base = game.expect[0];
+    const modRoot = fs.mod
+      ? (window.XashModule.sanitizeDirName(fs.mod.root) || `${base}_mod`)
+      : null;
+    const args = window.XashModule.buildLaunchArgs(game.id, modRoot);
+    const ctx = { base, modRoot, args };
+
     const overlay = html(`
       <div class="overlay overlay--engine" id="overlay-engine">
         <div class="modal modal--engine" role="dialog" aria-modal="true"
              aria-label="Инициализация движка Ха-кэш">
           <header class="modal__head">
             <div>
-              <div class="modal__eyebrow">Ха-кэш · fx build · wasm/web</div>
+              <div class="modal__eyebrow">Ха-кэш · local core · vfs mount</div>
               <h3 class="modal__title">Инициализация движка</h3>
               <div class="modal__sub">${escapeHtml(game.title)}</div>
             </div>
@@ -802,7 +813,7 @@
             <button class="btn btn--ghost btn--s" id="eng-cancel">ОТМЕНА</button>
             <div class="engine__done hidden" id="eng-done">
               <span class="ok-badge" id="eng-done-badge">${I.check}<span>движок готов</span></span>
-              <button class="btn btn--bracket btn--s" id="eng-to-menu">В МЕНЮ</button>
+              <button class="btn btn--bracket btn--s" id="eng-to-menu">ИГРАТЬ</button>
             </div>
           </footer>
         </div>
@@ -825,15 +836,15 @@
       closeX:  $('[data-close]', overlay),
     };
 
-    // чипы смонтированных томов — реальные данные выбранных папок
-    const mountChips = [`<span class="chip">target: ${escapeHtml(game.id)}</span>`];
-    mountChips.push(`<span class="chip chip--accent">/${escapeHtml(fs.game.root || 'game')} · ${filesLabel(fs.game.count)}</span>`);
-    if (fs.mod) mountChips.push(`<span class="chip chip--accent">/${escapeHtml(fs.mod.root || 'mod')} · ${filesLabel(fs.mod.count)}</span>`);
-    ui.mounts.innerHTML = mountChips.join('');
+    // чипы: реальные точки монтирования и командная строка ядра
+    ui.mounts.innerHTML = [
+      `<span class="chip chip--accent">/xash/${escapeHtml(base)} · ${filesLabel(fs.game.count)}</span>`,
+      fs.mod ? `<span class="chip chip--accent">overlay → ${filesLabel(fs.mod.count)}</span>` : '',
+      `<span class="chip">-game ${escapeHtml(modRoot || base)}</span>`,
+    ].join('');
 
     const run = { aborted: false, done: false };
 
-    // закрытие: только когда завершено или прервано
     const tryClose = () => {
       if (!run.done && !run.aborted) {
         toast('Идёт инициализация — дождитесь завершения или нажмите «ОТМЕНА»', 'warn');
@@ -843,51 +854,20 @@
     };
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) tryClose(); });
     ui.closeX.addEventListener('click', tryClose);
-    ui.toMenu.addEventListener('click', tryClose);
     ui.cancel.addEventListener('click', () => { run.aborted = true; });
 
     overlay._engineRun = run;
-    runSequence(game, fs, ui, run);
+    bootEngine(game, fs, ui, run, overlay, ctx);
   }
 
-  /* жизненный цикл загрузки: этапы используют реальные данные FileSet */
-  function buildStages(game, fs) {
-    const resInfo = (set) => ['wad', 'mdl', 'bsp', 'spr', 'wav']
-      .map((e) => `${e}×${set.byExt.get(e) || 0}`).join(' ');
+  /* ═══════════════ БОЕВОЙ ЗАПУСК ЯДРА ═══════════════ */
+  async function bootEngine(game, fs, ui, run, overlay, ctx) {
+    let proceeded = false;
 
-    const gl2 = (() => {
-      try { return !!document.createElement('canvas').getContext('webgl2'); }
-      catch { return false; }
-    })();
-
-    return [
-      { to: 9,   dur: 750,  label: 'Инициализация ядра «Ха-кэш»',   cls: 'sys',
-        log: 'xa-cache fx core · wasm bridge v1.1 · web abi' },
-      { to: 17,  dur: 650,  label: 'Проверка окружения',
-        log: `env: web runtime · ${navigator.hardwareConcurrency || '?'} cpu cores · webgl2 ${gl2 ? 'ok' : 'unavailable'}` },
-      { to: 36,  dur: 1200, label: 'Монтирование виртуальной ФС',   cls: 'ok',
-        log: `vfs: /${fs.game.root || 'game'} → ${filesLabel(fs.game.count)} (${fmtBytes(fs.game.size)})`,
-        extra: fs.mod ? `vfs: /${fs.mod.root || 'mod'} → ${filesLabel(fs.mod.count)} (${fmtBytes(fs.mod.size)})` : null,
-        extraCls: '' },
-      { to: 55,  dur: 1100, label: 'Сканирование игровых ресурсов',
-        log: `res[game]: ${resInfo(fs.game)}`,
-        extra: fs.mod ? `res[mod]:  ${resInfo(fs.mod)}` : null },
-      { to: 74,  dur: 1300, label: 'Кэширование текстур в видеопамять',
-        log: 'gpu: texture cache warming … streaming ok' },
-      { to: 88,  dur: 850,  label: 'Звуковая подсистема (html5 audio)',
-        log: 'snd: 48 kHz stereo · voice pipeline ok' },
-      { to: 97,  dur: 750,  label: 'Проверка целостности кэша',
-        log: 'crc: verifying chunks … ok' },
-      { to: 100, dur: 500,  label: 'Финализация',                   cls: 'ok',
-        log: 'engine: state → READY ✓' },
-    ];
-  }
-
-  async function runSequence(game, fs, ui, run) {
+    /* терминал */
     const t0 = performance.now();
     const cursorLine = html('<div class="log-line"><span class="t">&nbsp;</span><span class="term-cursor"></span></div>');
     ui.log.appendChild(cursorLine);
-
     const writeLog = (text, cls = '') => {
       const line = document.createElement('div');
       line.className = 'log-line' + (cls ? ' ' + cls : '');
@@ -899,67 +879,236 @@
       ui.log.scrollTop = ui.log.scrollHeight;
     };
 
-    writeLog(`target: ${game.title} (${game.id})`, 'sys');
-    writeLog('boot: sequence started', '');
+    const setStage = (t) => { ui.stage.textContent = t; };
+    const setBar = (pct) => {
+      const v = Math.max(0, Math.min(100, pct));
+      ui.bar.style.width = `${v}%`;
+      ui.pct.textContent = `${Math.round(v)}%`;
+    };
 
-    let cur = 0;
-    for (const st of buildStages(game, fs)) {
-      if (run.aborted) return finishAbort();
-      ui.stage.textContent = st.label;
-      writeLog(typeof st.log === 'function' ? st.log() : st.log, st.cls || '');
-      if (st.extra) writeLog(st.extra, st.extraCls != null ? st.extraCls : (st.cls || ''));
-      cur = await animateProgress(ui, cur, st.to, st.dur, run);
-      if (run.aborted) return finishAbort();
+    /* этап 1: подключение ядра */
+    setStage('загрузка ядра «ха-кэш»');
+    writeLog('boot: подключение локального ядра …', 'sys');
+    if (!window.XashCore || !window.XashVFS || !window.XashModule) {
+      writeLog('boot: engine/* не найдены — ядро недоступно', 'err');
+      toast('Ядро «Ха-кэш» не загружено — проверьте папку engine/', 'err', 5200);
+      return finishAbort('ядро не найдено');
     }
-    finishOk();
+    await animateProgress(ui, run, setBar, 0, 6, 550);
+    if (run.aborted) return finishAbort();
 
-    function finishOk() {
-      run.done = true;
-      ui.modal.classList.add('is-done');
-      ui.stage.textContent = 'инициализация завершена';
-      writeLog('boot: виртуальная ФС смонтирована, движок в состоянии READY', 'ok');
-      writeLog('hint: подключите wasm-сборку «Ха-кэш» для старта игровой сессии', 'sys');
-      ui.cancel.classList.add('hidden');
-      ui.doneBox.classList.remove('hidden');
+    /* этап 2: окружение (реальная проба GPU) */
+    setStage('проверка окружения');
+    const gpu = window.XashCore.probeGL();
+    writeLog(`env: cpu ×${navigator.hardwareConcurrency || '?'} · gpu: ${gpu.renderer || 'n/a'} (${gpu.kind})`);
+    await animateProgress(ui, run, setBar, 6, 14, 600);
+    if (run.aborted) return finishAbort();
+
+    /* этап 3: РЕАЛЬНОЕ монтирование файлов в VFS (побайтово) */
+    setStage('монтирование виртуальной фс');
+    const vfs = window.XashVFS.createVFS();
+    try {
+      await mountToVFS(vfs, ctx, fs, (frac) => setBar(14 + frac * 34), run, writeLog);
+    } catch (e) {
+      if (e.aborted) return finishAbort();
+      writeLog('vfs: ошибка монтирования — ' + e.message, 'err');
+      toast('Ошибка монтирования файлов: ' + e.message, 'err', 5200);
+      return finishAbort();
+    }
+    if (run.aborted) return finishAbort();
+
+    /* этап 4: Module + argv + запуск ядра (run-dependencies → прогресс) */
+    setStage('конфигурация module');
+    writeLog('argv: ' + ctx.args.join(' '), 'sys');
+
+    let depsMax = 0;
+    const Module = window.XashModule.create({
+      canvas: canvasEl,
+      onLog: (text, kind) => writeLog(text, kind === 'err' ? 'err' : ''),
+      onStatus: (t) => setStage(t),
+      onDepsLeft: (left) => {
+        depsMax = Math.max(depsMax, left);
+        const frac = depsMax ? 1 - left / depsMax : 1;
+        setBar(48 + frac * 52);
+        setStage(`ядро: main() · осталось файлов: ${left}`);
+      },
+      onReady: () => { run.done = true; },
+    });
+    Module.arguments = ctx.args;
+
+    let bootInfo;
+    try {
+      bootInfo = await window.XashCore.run(Module, vfs, { shouldAbort: () => run.aborted });
+    } catch (e) {
+      if (e.aborted) return finishAbort();
+      writeLog('core: сбой — ' + e.message, 'err');
+      toast('Сбой ядра: ' + e.message, 'err', 5200);
+      return finishAbort();
     }
 
-    function finishAbort() {
-      ui.stage.textContent = 'прервано пользователем';
+    /* ─── READY: плавно уходим на игровой холст ─── */
+    setBar(100);
+    setStage('инициализация завершена');
+    writeLog(`boot: движок онлайн · «${bootInfo.info.title || game.title}»`, 'ok');
+    ui.modal.classList.add('is-done');
+    ui.cancel.classList.add('hidden');
+    ui.doneBox.classList.remove('hidden');
+
+    const proceed = () => {
+      if (proceeded) return;
+      proceeded = true;
+      unmountOverlay(overlay, () => enterGameSession(game, bootInfo, {
+        args: ctx.args, vfs, Module, gpu,
+      }));
+    };
+    ui.toMenu.onclick = proceed;
+    setTimeout(proceed, 900);
+
+    function finishAbort(reason) {
+      run.aborted = true;
+      setStage(reason || 'прервано пользователем');
       ui.progress.classList.add('is-aborted');
       writeLog('boot: ABORT — последовательность остановлена', 'err');
       ui.cancel.classList.add('hidden');
+      ui.doneBox.classList.remove('hidden');
       ui.doneBadge.querySelector('span').textContent = 'прервано';
       ui.doneBadge.style.color = 'var(--amber)';
-      ui.doneBox.classList.remove('hidden');
+      ui.toMenu.textContent = 'В МЕНЮ';
+      ui.toMenu.onclick = () => unmountOverlay(overlay);
     }
   }
 
-  /* плавная анимация прогресс-бара между этапами */
-  function animateProgress(ui, from, to, dur, run) {
+  /* побайтовая запись FileSet'ов в VFS: база → /xash/<base>/,
+     мод — поверх в ту же директорию (перезаписывая оригиналы),
+     плюс каталог мода с symlink-деревом и liblist.gam для -game. */
+  async function mountToVFS(vfs, ctx, fs, onFrac, run, writeLog) {
+    const { base, modRoot } = ctx;
+    vfs.createPath('/', 'xash');
+
+    const totalBytes = (fs.game.size + (fs.mod ? fs.mod.size : 0)) || 1;
+    let written = 0, overwritten = 0, lastUi = 0;
+
+    const stripRoot = (set, path) =>
+      (set.root && path.startsWith(set.root + '/')) ? path.slice(set.root.length + 1) : path;
+
+    async function writeSet(set) {
+      for (const it of set.items) {
+        if (run.aborted) { const e = new Error('ABORT'); e.aborted = true; throw e; }
+        const rel = stripRoot(set, it.path);
+        if (!rel) { written += it.size; continue; }
+        const target = '/xash/' + base + '/' + rel;
+
+        let bytes = it.file;
+        if (!(bytes instanceof Uint8Array)) {
+          // File/Blob из диалога/дропа — честно читаем байты
+          bytes = new Uint8Array(await bytes.arrayBuffer());
+        }
+        if (vfs.exists(target)) overwritten++;
+        vfs.writeFile(target, bytes);
+
+        written += it.size;
+        const now = performance.now();
+        if (now - lastUi > 60) { // не душим кадр
+          onFrac(Math.min(1, written / totalBytes));
+          lastUi = now;
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      }
+    }
+
+    await writeSet(fs.game);
+    writeLog(`vfs: /xash/${base} ← ${filesLabel(fs.game.count)} (${fmtBytes(fs.game.size)})`, 'ok');
+
+    if (fs.mod) {
+      await writeSet(fs.mod);
+      writeLog(`vfs: overlay → /xash/${base} · ${filesLabel(fs.mod.count)}, перезаписано оригиналов: ${overwritten}`, 'ok');
+    }
+    onFrac(1);
+
+    // каталог мода для -game <modRoot>: ссылки на перезаписанные байты
+    // (память не дублируется) + liblist.gam, если мода нет своего
+    if (fs.mod && modRoot) {
+      vfs.createPath('/xash', modRoot);
+      let linked = 0;
+      for (const it of fs.mod.items) {
+        const rel = stripRoot(fs.mod, it.path);
+        if (!rel) continue;
+        const src = '/xash/' + base + '/' + rel;
+        const dst = '/xash/' + modRoot + '/' + rel;
+        if (vfs.isFile(src) && !vfs.exists(dst)) { vfs.symlink(src, dst); linked++; }
+      }
+      if (!vfs.isFile('/xash/' + modRoot + '/liblist.gam')) {
+        let title = fs.mod.root || modRoot;
+        const baseLib = '/xash/' + base + '/liblist.gam';
+        if (vfs.isFile(baseLib)) {
+          try {
+            const parsed = window.XashCore.parseLiblist(new TextDecoder().decode(vfs.readFile(baseLib)));
+            if (parsed.title) title = parsed.title;
+          } catch (e) { /* оставляем имя папки */ }
+        }
+        vfs.writeFile('/xash/' + modRoot + '/liblist.gam',
+          `// generated by hash-online portal\ngame "${title}"\ngamedir "${modRoot}"\nversion "1.0"\n`);
+      }
+      writeLog(`vfs: /xash/${modRoot} · ссылок: ${linked} · liblist.gam готов`, 'sys');
+    }
+    return overwritten;
+  }
+
+  /* анимированный переход процента на ранних этапах (до реальных данных) */
+  function animateProgress(ui, run, setBar, from, to, dur) {
     return new Promise((resolve) => {
       const t0 = performance.now();
       const frame = (t) => {
-        if (run.aborted) return resolve(from + (to - from) * Math.min(1, (t - t0) / dur));
+        if (run.aborted) return resolve();
         const k = Math.min(1, (t - t0) / dur);
         const eased = 1 - Math.pow(1 - k, 3);
-        const v = from + (to - from) * eased;
-        ui.bar.style.width = `${v}%`;
-        ui.pct.textContent = `${Math.round(v)}%`;
+        setBar(from + (to - from) * eased);
         if (k < 1) requestAnimationFrame(frame);
-        else resolve(to);
+        else resolve();
       };
       requestAnimationFrame(frame);
     });
   }
 
+  /* ═══════════════ ИГРОВАЯ СЕССИЯ (canvas на весь экран) ═══════════════ */
+  let session = null;
+
+  function enterGameSession(game, bootInfo, ctx) {
+    const renderer = window.XashCore.startRenderLoop(canvasEl);
+
+    $('#hud-title').textContent = bootInfo.info.title || game.title;
+    $('#hud-args').textContent =
+      `argv: ${ctx.args.join(' ')} · gpu: ${(ctx.gpu && ctx.gpu.renderer) || renderer.renderer} · vfs: ${bootInfo.stats.files} файлов`;
+    $('#hud-fps').textContent = '— fps';
+
+    session = { renderer, vfs: ctx.vfs, Module: ctx.Module, args: ctx.args };
+    session.fpsTimer = setInterval(() => {
+      if (session) $('#hud-fps').textContent = `${session.renderer.fps} fps · ${window.XashCore.CORE_VERSION}`;
+    }, 500);
+
+    switchScreen(menuScreen, gameScreen);
+    setTimeout(() => canvasEl.focus({ preventScroll: true }), 420);
+    toast(`Движок онлайн: «${bootInfo.info.title || game.title}»`, 'ok', 4200);
+  }
+
+  function exitGameSession() {
+    if (document.pointerLockElement) document.exitPointerLock();
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    if (session) {
+      clearInterval(session.fpsTimer);
+      session.renderer.stop();
+      if (session.vfs) session.vfs.reset();
+      session = null;
+    }
+    $('#hud-fps').textContent = '— fps';
+    switchScreen(gameScreen, menuScreen);
+    toast('Сессия движка завершена — файлы остаются в библиотеке', 'ok');
+  }
+
   /* ── глобальные обработчики ─────────────────────────────────── */
   function bindGlobal() {
-    // [ НАЧАТЬ ]
-    $('#btn-start').addEventListener('click', () => {
-      switchScreen(splashScreen, menuScreen);
-    });
+    $('#btn-start').addEventListener('click', () => switchScreen(splashScreen, menuScreen));
 
-    // Enter на заставке / Escape закрывает верхнее окно
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && splashScreen.classList.contains('is-active') && !modalRoot.children.length) {
         $('#btn-start').click();
@@ -977,10 +1126,47 @@
       }
     });
 
-    // [ ВЫХОД ] → обратно на заставку
-    $('#btn-exit').addEventListener('click', () => {
-      switchScreen(menuScreen, splashScreen);
+    $('#btn-exit').addEventListener('click', () => switchScreen(menuScreen, splashScreen));
+
+    /* HUD игрового холста */
+    const hudPointer = $('#hud-pointer');
+    const hudFull    = $('#hud-full');
+    const hudExit    = $('#hud-exit');
+
+    const requestLock = () => {
+      if (document.pointerLockElement === canvasEl) return;
+      try {
+        const p = canvasEl.requestPointerLock();
+        if (p && p.catch) p.catch(() => toast('Браузер отклонил захват мыши', 'warn'));
+      } catch (err) { toast('Захват мыши не поддерживается', 'warn'); }
+    };
+    hudPointer.addEventListener('click', () => {
+      if (!gameScreen.classList.contains('is-active')) return;
+      if (document.pointerLockElement === canvasEl) document.exitPointerLock();
+      else requestLock();
     });
+    canvasEl.addEventListener('click', () => {
+      if (gameScreen.classList.contains('is-active')) requestLock();
+    });
+    document.addEventListener('pointerlockchange', () => {
+      const on = document.pointerLockElement === canvasEl;
+      hudPointer.textContent = on ? 'МЫШЬ ЗАХВАЧЕНА' : 'ЗАХВАТ МЫШИ';
+      hudPointer.classList.toggle('is-on', on);
+    });
+
+    hudFull.addEventListener('click', () => {
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      } else {
+        gameScreen.requestFullscreen({ navigationUI: 'hide' })
+          .catch(() => toast('Браузер отклонил полноэкранный режим', 'warn'));
+      }
+    });
+    document.addEventListener('fullscreenchange', () => {
+      hudFull.textContent = document.fullscreenElement ? 'СВЕРНУТЬ' : 'ВО ВЕСЬ ЭКРАН';
+    });
+
+    hudExit.addEventListener('click', exitGameSession);
 
     // запрет навигации при случайном дропе файлов мимо зон
     document.addEventListener('dragover', (e) => e.preventDefault());

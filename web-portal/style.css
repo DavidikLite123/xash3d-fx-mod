@@ -849,3 +849,65 @@ body.extra-open .more-plus { transform: rotate(45deg); }
     transition-duration: .01ms !important;
   }
 }
+
+/* ═══ ЭКРАН 3 · ИГРОВОЙ ХОЛСТ (канвас движка «Ха-кэш») ═════════ */
+.screen--game { background: #000; }
+
+#game-canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  display: block; outline: none;
+  cursor: crosshair;
+}
+
+.game-hud {
+  position: absolute; z-index: 5; top: 0; left: 0; right: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+  padding: 10px 14px;
+  font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase;
+  color: #bfeadc;
+  background: linear-gradient(180deg, rgba(2, 6, 10, .82), rgba(2, 6, 10, 0));
+}
+.game-hud__left, .game-hud__right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.game-hud__brand {
+  font-family: var(--disp); font-weight: 900; font-size: 13px;
+  color: #f2fffb; text-shadow: 0 0 12px rgba(0, 255, 200, .5);
+}
+.game-hud__brand span { color: var(--faint); text-shadow: none; font-size: .8em; }
+
+.hud-chip {
+  padding: 4px 11px;
+  border: 1px solid rgba(0, 255, 200, .28); border-radius: 99px;
+  color: var(--mint); background: rgba(4, 10, 16, .5);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.hud-chip--title { color: #9fe8d8; border-color: rgba(0, 255, 200, .16); max-width: 46vw; overflow: hidden; text-overflow: ellipsis; }
+
+.hud-btn {
+  padding: 7px 14px;
+  border: 1px solid rgba(0, 255, 200, .3); border-radius: 8px;
+  background: rgba(4, 10, 16, .55); color: #d7fff3;
+  letter-spacing: .16em; font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+  transition: border-color .25s, box-shadow .3s, background .25s, color .25s;
+}
+.hud-btn:hover { border-color: var(--mint); box-shadow: 0 0 18px -6px var(--mint); }
+.hud-btn.is-on { background: rgba(0, 255, 200, .12); color: #fff; border-color: var(--mint); }
+.hud-btn--danger:hover { border-color: var(--pink); color: #ffd7e0; box-shadow: 0 0 18px -6px var(--pink); }
+
+.game-args {
+  position: absolute; z-index: 5; left: 14px; bottom: 12px;
+  font-size: 10px; letter-spacing: .08em;
+  color: rgba(165, 222, 207, .55);
+  max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.game-hint {
+  position: absolute; z-index: 5; right: 14px; bottom: 12px;
+  font-size: 10px; letter-spacing: .12em;
+  color: rgba(140, 170, 190, .5); text-transform: uppercase;
+}
+
+@media (max-width: 720px) {
+  .game-hint, .game-args { display: none; }
+  .hud-chip--title { max-width: 34vw; }
+}

@@ -44,7 +44,7 @@
 
       <div class="splash__kbd">нажмите <kbd>Enter</kbd> для продолжения</div>
     </div>
-    <div class="screen-version">hash-online · portal v1.1.0</div>
+    <div class="screen-version">hash-online · portal v1.2.0 · local core</div>
   </section>
 
   <!-- ═══════════════ ЭКРАН 2 · ГЛАВНОЕ МЕНЮ ═══════════════ -->
@@ -77,9 +77,30 @@
 
       <footer class="menu__foot">
         <span id="menu-status" class="menu-status"><i class="dot"></i><span class="menu-status__text">библиотека пуста — загрузите файлы игры</span></span>
-        <span class="menu__build">xa-cache // fx-mod · web core · wasm</span>
+        <span class="menu__build">xa-cache // fx-mod · local core · wasm-ready</span>
       </footer>
     </div>
+  </section>
+
+  <!-- ═══════════════ ЭКРАН 3 · ИГРОВОЙ ХОЛСТ (канвас движка) ═══════════════ -->
+  <section id="screen-game" class="screen screen--game" aria-label="Игровой холст" aria-hidden="true">
+    <canvas id="game-canvas" tabindex="0" aria-label="Игровой рендер движка Ха-кэш"></canvas>
+
+    <div class="game-hud">
+      <div class="game-hud__left">
+        <span class="game-hud__brand">HASH<span>·ONLINE</span></span>
+        <span class="hud-chip hud-chip--title" id="hud-title">—</span>
+      </div>
+      <div class="game-hud__right">
+        <span class="hud-chip" id="hud-fps">— fps</span>
+        <button class="hud-btn" id="hud-pointer" type="button">ЗАХВАТ МЫШИ</button>
+        <button class="hud-btn" id="hud-full" type="button">ВО ВЕСЬ ЭКРАН</button>
+        <button class="hud-btn hud-btn--danger" id="hud-exit" type="button">В МЕНЮ</button>
+      </div>
+    </div>
+
+    <div class="game-args" id="hud-args"></div>
+    <div class="game-hint">Esc — освободить мышь · клик по холсту — захват управления</div>
   </section>
 
   <!-- Сюда скрипт монтирует модальные окна -->
@@ -88,6 +109,10 @@
   <!-- Уведомления -->
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
+  <!-- Локальное ядро «Ха-кэш» (VFS → Module → core) -->
+  <script src="engine/vfs.js"></script>
+  <script src="engine/module.js"></script>
+  <script src="engine/xash.js"></script>
   <!-- Локальная копия JSZip (умная распаковка мобильного кэша) -->
   <script src="vendor/jszip.min.js"></script>
   <script src="app.js"></script>
