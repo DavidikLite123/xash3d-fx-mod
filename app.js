@@ -2,126 +2,259 @@
    HASH ONLINE · фронтенд-портал для движка «Ха-кэш»
    Кроссплатформенный браузерный клиент (десктоп / мобильные)
 
-   Архитектура автономного ядра (engine/xash.js):
+   Архитектура автономного ядра (engine/xash.js + /xash.js):
      var Module = { ... }            — глобальный контракт Emscripten
-     Module.FS                       — эмуляция ФС (mkdir / createDataFile)
-     XashCore.run(Module)            — boot: argv, индекс, CRC32, liblist
+     Module.FS                       — виртуальная файловая система Emscripten
+     Module['arguments']             — стартовые параметры клиента игры
      onRuntimeInitialized            — полноэкранный <canvas id="canvas">
-                                       + интерактивный WebGL 3D-цикл.
-
-   Интерфейс работает в тишине: синтезированных звуков нет.
+                                       + захват управления мышью (Pointer Lock).
    ════════════════════════════════════════════════════════════════ */
 'use strict';
 
 /* ── чистые функции (используются и в браузере, и в Node-тестах) ── */
-  const plural = (n, [one, few, many]) => {
-    const m = n % 100, d = n % 10;
-    if (m > 10 && m < 20) return many;
-    if (d > 1 && d < 5) return few;
-    if (d === 1) return one;
-    return many;
-  };
-  const filesLabel = (n) => `${n} ${plural(n, ['файл', 'файла', 'файлов'])}`;
+const plural = (n, [one, few, many]) => {
+  const m = n % 100, d = n % 10;
+  if (m > 10 && m < 20) return many;
+  if (d > 1 && d < 5) return few;
+  if (d === 1) return one;
+  return many;
+};
+const filesLabel = (n) => `${n} ${plural(n, ['файл', 'файла', 'файлов'])}`;
 
-  const fmtBytes = (n) => {
-    if (n < 1024) return `${n} Б`;
-    if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} КБ`;
-    if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} МБ`;
-    return `${(n / 1024 ** 3).toFixed(2)} ГБ`;
-  };
+const fmtBytes = (n) => {
+  if (n < 1024) return `${n} Б`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} КБ`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} МБ`;
+  return `${(n / 1024 ** 3).toFixed(2)} ГБ`;
+};
 
-  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[c]));
 
-  /* ── конфигурация платформ ──────────────────────────────────── */
+/* ── конфигурация платформ и фильтрация архива ──────────────── */
 
-  const JUNK_BASENAMES = new Set(['.ds_store', 'thumbs.db', 'desktop.ini']);
-  const isJunkPath = (name) => {
-    const segs = String(name).split('/');
-    return segs.some((s) => s === '__MACOSX') ||
-           JUNK_BASENAMES.has((segs[segs.length - 1] || '').toLowerCase());
-  };
+const JUNK_BASENAMES = new Set(['.ds_store', 'thumbs.db', 'desktop.ini']);
+const isJunkPath = (name) => {
+  const segs = String(name).split('/');
+  return segs.some((s) => s === '__MACOSX') ||
+         JUNK_BASENAMES.has((segs[segs.length - 1] || '').toLowerCase());
+};
 
-  function pickZipTargets(names, targets) {
-    const picked = [];
-    let skipped = 0;
-    for (const name of names) {
-      const segs = String(name).split('/').filter(Boolean);
-      if (!segs.length) { skipped++; continue; }
-      if (!targets) { picked.push({ name, rel: segs.join('/') }); continue; }
-      const idx = segs.findIndex((s) => targets.includes(s.toLowerCase()));
-      if (idx === -1 || idx === segs.length - 1) { skipped++; continue; }
-      picked.push({ name, rel: segs.slice(idx).join('/') });
-    }
-    return { picked, skipped };
+function pickZipTargets(names, targets) {
+  const picked = [];
+  let skipped = 0;
+  for (const name of names) {
+    const segs = String(name).split('/').filter(Boolean);
+    if (!segs.length) { skipped++; continue; }
+    if (!targets) { picked.push({ name, rel: segs.join('/') }); continue; }
+    const idx = segs.findIndex((s) => targets.includes(s.toLowerCase()));
+    if (idx === -1 || idx === segs.length - 1) { skipped++; continue; }
+    picked.push({ name, rel: segs.slice(idx).join('/') });
   }
+  return { picked, skipped };
+}
 
-  function makeFileSet(items) {
-    items.sort((a, b) => a.path.localeCompare(b.path, 'ru'));
-    const size = items.reduce((s, it) => s + it.size, 0);
-    const roots = new Set(items.map((it) => it.path.split('/')[0]));
-    const byExt = new Map();
-    for (const it of items) {
-      const m = /\.([a-z0-9]{1,8})$/i.exec(it.path);
-      const ext = m ? m[1].toLowerCase() : '—';
-      byExt.set(ext, (byExt.get(ext) || 0) + 1);
-    }
-    return { items, count: items.length, size,
-             root: roots.size === 1 ? [...roots][0] : null, byExt };
+function makeFileSet(items) {
+  items.sort((a, b) => a.path.localeCompare(b.path, 'ru'));
+  const size = items.reduce((s, it) => s + it.size, 0);
+  const roots = new Set(items.map((it) => it.path.split('/')[0]));
+  const byExt = new Map();
+  for (const it of items) {
+    const m = /\.([a-z0-9]{1,8})$/i.exec(it.path);
+    const ext = m ? m[1].toLowerCase() : '—';
+    byExt.set(ext, (byExt.get(ext) || 0) + 1);
   }
+  return { items, count: items.length, size,
+           root: roots.size === 1 ? [...roots][0] : null, byExt };
+}
 
-  /* Последовательная распаковка с динамическим прогрессом по байтам */
-  async function extractZipSet(zip, targets, onProgress) {
-    const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir && !isJunkPath(n));
-    const { picked, skipped } = pickZipTargets(names, targets);
-    if (targets && !picked.length) return { set: null, skipped };
+/* Последовательная распаковка с динамическим прогрессом по байтам */
+async function extractZipSet(zip, targets, onProgress) {
+  const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir && !isJunkPath(n));
+  const { picked, skipped } = pickZipTargets(names, targets);
+  if (targets && !picked.length) return { set: null, skipped };
 
-    const sizes = picked.map((p) => {
-      const d = zip.files[p.name]._data;
-      return (d && d.uncompressedSize > 0) ? d.uncompressedSize : 0;
+  const sizes = picked.map((p) => {
+    const d = zip.files[p.name]._data;
+    return (d && d.uncompressedSize > 0) ? d.uncompressedSize : 0;
+  });
+  const total = sizes.reduce((a, b) => a + b, 0) || picked.length || 1;
+
+  let done = 0;
+  const items = [];
+  for (let i = 0; i < picked.length; i++) {
+    const entry = zip.files[picked[i].name];
+    const data = await entry.async('uint8array', (meta) => {
+      if (onProgress) {
+        const within = (sizes[i] || 1) * (meta.percent / 100);
+        onProgress(Math.min(99, Math.round(((done + within) / total) * 100)));
+      }
     });
-    const total = sizes.reduce((a, b) => a + b, 0) || picked.length || 1;
+    done += sizes[i] || data.length;
+    items.push({ file: data, path: picked[i].rel, size: data.length });
+    if (onProgress) onProgress(Math.round((done / total) * 100));
+  }
+  return { set: makeFileSet(items), skipped };
+}
 
-    let done = 0;
-    const items = [];
-    for (let i = 0; i < picked.length; i++) {
-      const entry = zip.files[picked[i].name];
-      const data = await entry.async('uint8array', (meta) => {
-        if (onProgress) {
-          const within = (sizes[i] || 1) * (meta.percent / 100);
-          onProgress(Math.min(99, Math.round(((done + within) / total) * 100)));
-        }
-      });
-      done += sizes[i] || data.length;
-      items.push({ file: data, path: picked[i].rel, size: data.length });
-      if (onProgress) onProgress(Math.round((done / total) * 100));
+/* ветка обработчика drop: без папок вперемешку берём только .zip */
+const pickDropZips = (files) => files.filter((f) => /\.zip$/i.test((f && f.name) || ''));
+
+/* ════════════════════════════════════════════════════════════
+   ИНТЕГРАЦИЯ EMSCRIPTEN FS: ПУТИ, ПАПКИ И СТАРТОВЫЕ АРГУМЕНТЫ
+   ════════════════════════════════════════════════════════════ */
+
+/**
+ * 1. Рекурсивное создание подпапок через Module.FS.mkdir(path),
+ * если они ещё не созданы (например, /xash/cstrike/models/player/).
+ */
+function ensureFSDirectory(FS, dirPath) {
+  if (!FS || typeof FS.mkdir !== 'function') return;
+  const parts = String(dirPath || '').split('/').filter(Boolean);
+  let cur = '';
+  for (const part of parts) {
+    cur += '/' + part;
+    let exists = false;
+    try {
+      if (typeof FS.analyzePath === 'function') {
+        const analyzed = FS.analyzePath(cur);
+        exists = !!(analyzed && analyzed.exists);
+      } else if (typeof FS.isDir === 'function') {
+        exists = FS.isDir(cur);
+      }
+    } catch (_) {
+      exists = false;
     }
-    return { set: makeFileSet(items), skipped };
+    if (!exists) {
+      try {
+        FS.mkdir(cur);
+      } catch (err) {
+        // Игнорируем ошибку, если каталог уже существует (EEXIST / errno 20)
+      }
+    }
+  }
+}
+
+/**
+ * 2. Преобразование относительного пути из ZIP-архива в абсолютный путь для FS движка:
+ * - Для Half-Life все файлы монтируются строго начиная с пути: /xash/valve/
+ * - Для Counter-Strike 1.6 все файлы монтируются строго начиная с пути: /xash/cstrike/
+ */
+function resolveFSAbsolutePath(gameId, relPath) {
+  const isCS = gameId === 'cs16' || gameId === 'cs16mod' || /cstrike/i.test(String(gameId));
+  const baseDir = isCS ? 'cstrike' : 'valve';
+  const prefix = `/xash/${baseDir}`;
+
+  let cleanRel = String(relPath || '').replace(/\\/g, '/');
+  cleanRel = cleanRel.replace(/^\/+/, '');
+  // Снимаем ведущий сегмент 'cstrike/' или 'valve/', чтобы не дублировать
+  cleanRel = cleanRel.replace(/^(?:cstrike|valve)\//i, '');
+
+  return `${prefix}/${cleanRel}`;
+}
+
+/**
+ * 1 & 2. Построчная и побайтовая запись файла в виртуальную файловую систему Emscripten.
+ * Использует встроенную функцию:
+ * Module.FS.createDataFile(parent_path, filename, uint8_array_data, canRead, canWrite, canOwn).
+ * Перед записью рекурсивно создаёт подпапки через Module.FS.mkdir(path).
+ */
+function mountFileToFS(FS, absPath, data, canRead = true, canWrite = true, canOwn = true) {
+  if (!FS || typeof FS.createDataFile !== 'function') return false;
+  const norm = '/' + String(absPath || '').split('/').filter(Boolean).join('/');
+  const lastSlash = norm.lastIndexOf('/');
+  const parentPath = lastSlash <= 0 ? '/' : norm.slice(0, lastSlash);
+  const filename = norm.slice(lastSlash + 1);
+  if (!filename) return false;
+
+  // Рекурсивно создаём подпапки через Module.FS.mkdir
+  ensureFSDirectory(FS, parentPath);
+
+  // Удаляем старый узел, если файл уже существовал, во избежание конфликта перезаписи
+  try {
+    if (typeof FS.analyzePath === 'function' && FS.analyzePath(norm).exists) {
+      if (typeof FS.unlink === 'function') FS.unlink(norm);
+    }
+  } catch (_) {}
+
+  // Приведение данных к Uint8Array
+  let bytes = data;
+  if (!(bytes instanceof Uint8Array)) {
+    if (typeof data === 'string') {
+      bytes = new TextEncoder().encode(data);
+    } else if (data && data.buffer) {
+      bytes = new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength);
+    } else {
+      bytes = new Uint8Array(data || 0);
+    }
   }
 
-  /* ветка обработчика drop: без папок вперемешку берём только .zip */
-  const pickDropZips = (files) => files.filter((f) => /\.zip$/i.test((f && f.name) || ''));
+  // Запись в Emscripten FS
+  FS.createDataFile(parentPath, filename, bytes, canRead, canWrite, canOwn);
+  return true;
+}
 
+/**
+ * 3. Стартовые аргументы клиента для Module['arguments']:
+ * - Для CS 1.6: ["-game", "cstrike", "-dev", "3", "-log"]
+ * - Для Half-Life: ["-dev", "3", "-log"]
+ */
+function getLaunchArguments(gameId, modRoot) {
+  if (gameId === 'cs16') {
+    return ['-game', 'cstrike', '-dev', '3', '-log'];
+  }
+  if (gameId === 'hl1') {
+    return ['-dev', '3', '-log'];
+  }
+  if (gameId === 'cs16mod') {
+    return ['-game', modRoot || 'cstrike_mod', '-dev', '3', '-log'];
+  }
+  if (gameId === 'hl1mod') {
+    return ['-game', modRoot || 'valve_mod', '-dev', '3', '-log'];
+  }
+  return ['-dev', '3', '-log'];
+}
 
 /* ── экспорт для Node и ESM ── */
-const __testExports = { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickDropZips };
+const __testExports = {
+  pickZipTargets,
+  isJunkPath,
+  extractZipSet,
+  makeFileSet,
+  fmtBytes,
+  pickDropZips,
+  ensureFSDirectory,
+  mountFileToFS,
+  resolveFSAbsolutePath,
+  getLaunchArguments,
+};
 if (typeof module !== 'undefined' && typeof module.exports !== 'undefined') {
   module.exports = __testExports;
 }
-export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickDropZips };
+export {
+  pickZipTargets,
+  isJunkPath,
+  extractZipSet,
+  makeFileSet,
+  fmtBytes,
+  pickDropZips,
+  ensureFSDirectory,
+  mountFileToFS,
+  resolveFSAbsolutePath,
+  getLaunchArguments,
+};
 
 /* ═══════════════ БРАУЗЕРНЫЙ КОД (Vite ESM) ═══════════════ */
 (() => {
   if (typeof document === 'undefined') return;
 
-  const $  = (sel, root) => (root || document).querySelector(sel);
+  const $ = (sel, root) => (root || document).querySelector(sel);
   const html = (markup) => {
     const t = document.createElement('template');
     t.innerHTML = markup.trim();
     return t.content.firstElementChild;
   };
-
 
   const GAMES = [
     {
@@ -178,11 +311,11 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
 
   const gameById = (id) => GAMES.find((g) => g.id === id);
 
-  /* ── подсказки «где взять файлы» (только легальные источники) ── */
+  /* ── подсказки «где взять файлы» ── */
   const LINKS = {
     cs: {
       where: {
-        note: 'Мобильный кэш — это папка <b>«cstrike»</b> из установленной игры, упакованная в .zip (обычно 100–190 МБ). Легальный способ: скопируйте папку из своей копии игры → сожмите в .zip → загрузите сюда. Движок примет архив любого размера и сам отфильтрует лишнее.',
+        note: 'Мобильный кэш — это папка <b>«cstrike»</b> из установленной игры, упакованная в .zip (обычно 100–190 МБ). Скопируйте папку из своей копии игры → сожмите в .zip → загрузите сюда.',
         links: [
           { host: 'официальный сайт', title: 'Counter-Strike — официальная страница',
             url: 'https://www.counter-strike.net/', desc: 'получите игру, затем соберите кэш из папки cstrike' },
@@ -193,47 +326,32 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
       mods: {
         note: 'Бесплатные модификации, совместимые с движком «Ха-кэш»: скачайте .zip и загрузите в поле «Файлы мода» — содержимое наложится в памяти поверх оригинального кэша.',
         links: [
-          { host: 'gamebanana.com', title: 'GameBanana — хаб CS 1.6',
-            url: 'https://gamebanana.com/games/4254', desc: 'тысячи карт, моделей и скинов от сообщества' },
-          { host: 'moddb.com', title: 'Модификации CS на ModDB',
-            url: 'https://www.moddb.com/games/counter-strike/mods', desc: 'крупные моды и тотальные конверсии' },
+          { host: 'gamebanana.com', title: 'GameBanana — моды и скины CS 1.6',
+            url: 'https://gamebanana.com/games/4254', desc: 'оружие, звуки, модели игроков и интерфейсы' },
         ],
       },
     },
     hl: {
       where: {
-        note: 'Мобильный кэш — это папка <b>«valve»</b> из установленной игры, упакованная в .zip (обычно 100–190 МБ). Легальный способ: скопируйте папку из своей копии игры → сожмите в .zip → загрузите сюда. Движок примет архив любого размера и сам отфильтрует лишнее.',
+        note: 'Мобильный кэш — это папка <b>«valve»</b> из установленной копии Half-Life. Сожмите её в архив .zip и перетащите в область загрузки.',
         links: [
-          { host: 'официальный сайт', title: 'Half-Life — официальная страница серии',
-            url: 'https://www.half-life.com/', desc: 'получите игру, затем упакуйте папку valve в .zip' },
+          { host: 'half-life.com', title: 'Half-Life — официальный сайт Valve',
+            url: 'https://www.half-life.com/en/halflife', desc: 'оригинальная игра от Valve' },
           { host: 'moddb.com', title: 'Half-Life на ModDB',
-            url: 'https://www.moddb.com/games/half-life', desc: 'сообщество и архив материалов' },
+            url: 'https://www.moddb.com/games/half-life', desc: 'огромная база модов и карт' },
         ],
       },
       mods: {
-        note: 'Бесплатные модификации, совместимые с движком «Ха-кэш»: скачайте .zip и загрузите в поле «Файлы мода» — содержимое наложится в памяти поверх оригинального кэша.',
+        note: 'Моды для Half-Life (например, They Hunger, Poke646 и др.): загрузите .zip архива мода во второе поле.',
         links: [
-          { host: 'moddb.com', title: 'Модификации Half-Life на ModDB',
-            url: 'https://www.moddb.com/games/half-life/mods', desc: 'крупнейшая библиотека модов' },
-          { host: 'runthinkshootlive.com', title: 'RunThinkShootLive',
-            url: 'https://www.runthinkshootlive.com/', desc: 'карты и моды Half-Life с обзорами' },
-          { host: 'moddb.com', title: 'They Hunger (трилогия)',
-            url: 'https://www.moddb.com/mods/they-hunger', desc: 'культовый хоррор-мод — бесплатно' },
-          { host: 'moddb.com', title: 'Poke646: Anniversary Edition',
-            url: 'https://www.moddb.com/mods/poke646', desc: 'признанный сюжетный мод — бесплатно' },
+          { host: 'runthinkshootlive.com', title: 'Run Think Shoot Live',
+            url: 'https://www.runthinkshootlive.com/', desc: 'каталог синглплеерных модификаций для Half-Life' },
         ],
       },
     },
   };
-  const linksFor = (game) => LINKS[game.expect[0] === 'cstrike' ? 'cs' : 'hl'];
 
-  /* ═══════════════ УМНАЯ РАСПАКОВКА .ZIP (чистые функции) ═══════════════
-     Принимает архив любого размера, сканирует ВСЁ дерево папок на
-     любой глубине и оставляет только содержимое целевой папки игры
-     (cstrike / valve). Остальной контент игнорируется и вычищается. */
-
-
-
+  const linksFor = (g) => (g.expect[0] === 'cstrike' ? LINKS.cs : LINKS.hl);
 
   /* ── SVG-иконки ─────────────────────────────────────────────── */
   const I = {
@@ -277,6 +395,48 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
     return g.kind === 'modified' ? !!(fs.game && fs.mod) : !!fs.game;
   };
 
+  /* ── глобальный кэш смонтированных файлов для FS ── */
+  const mountedFilesCache = new Map(); // absPath -> Uint8Array
+
+  function syncCacheToFS(FS) {
+    if (!FS || typeof FS.createDataFile !== 'function') return;
+    for (const [absPath, bytes] of mountedFilesCache) {
+      mountFileToFS(FS, absPath, bytes, true, true, true);
+    }
+  }
+
+  // Перехват присвоения FS в Module (когда подключается /xash.js)
+  if (typeof window !== 'undefined' && window.Module) {
+    let currentFS = window.Module.FS;
+    try {
+      Object.defineProperty(window.Module, 'FS', {
+        get() { return currentFS; },
+        set(newFS) {
+          currentFS = newFS;
+          if (newFS) syncCacheToFS(newFS);
+        },
+        configurable: true,
+        enumerable: true,
+      });
+    } catch (_) {}
+
+    if (!Array.isArray(window.Module.preRun)) {
+      window.Module.preRun = [];
+    }
+    window.Module.preRun.push(() => {
+      if (window.Module && window.Module.FS) {
+        syncCacheToFS(window.Module.FS);
+      }
+    });
+
+    // Фоновая загрузка оригинального glue /xash.js для прогрева Emscripten MEMFS
+    if (window.XashCore && typeof window.XashCore.loadRealGlue === 'function') {
+      window.XashCore.loadRealGlue({ timeoutMs: 30000 })
+        .then((glue) => { if (glue && glue.FS) syncCacheToFS(glue.FS); })
+        .catch(() => {});
+    }
+  }
+
   /* ── уведомления ────────────────────────────────────────────── */
   const toastRoot = $('#toast-root');
   function toast(message, type = 'info', ttl = 3600) {
@@ -284,10 +444,10 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
     toastRoot.appendChild(note);
     const kill = () => {
       note.classList.add('is-out');
-      setTimeout(() => note.remove(), 320);
+      setTimeout(() => note.remove(), 260);
     };
-    setTimeout(kill, ttl);
-    note.addEventListener('click', kill);
+    const t = setTimeout(kill, ttl);
+    note.addEventListener('click', () => { clearTimeout(t); kill(); });
   }
 
   /* ── экраны ─────────────────────────────────────────────────── */
@@ -307,23 +467,32 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
 
   /* ── рендер карточек ────────────────────────────────────────── */
   function cardTpl(g) {
-    const chips = g.chips
-      .map((c, i) => `<span class="chip ${i === 1 ? 'chip--accent' : ''}">${escapeHtml(c)}</span>`)
-      .join('');
-    return html(`
-      <article class="game-card ${g.kind === 'port' ? 'game-card--wip' : ''}"
-               style="--accent:${g.accent}" data-id="${g.id}"
-               tabindex="0" role="button" aria-label="${escapeHtml(g.title)}">
+    const ready = isGameReady(g);
+    const isPort = g.kind === 'port';
+    const card = html(`
+      <div class="game-card ${ready ? 'is-ready' : ''}" data-id="${g.id}" tabindex="0" role="button"
+           style="--accent:${g.accent}" aria-label="${escapeHtml(g.title)}">
         <span class="game-card__scan"></span>
-        <div class="game-card__icon">${I[g.icon]}</div>
-        <h3 class="game-card__title">${g.title}</h3>
-        <p class="game-card__desc">${g.desc}</p>
-        <div class="game-card__chips">${chips}</div>
-        <div class="game-card__foot">
-          <span class="card-status"><i class="dot"></i><span class="card-status__text">файлы не загружены</span></span>
-          ${g.badge ? `<span class="badge">${g.badge}</span>` : '<span class="card-arrow" aria-hidden="true">→</span>'}
+        <div class="game-card__icon">${I[g.icon] || ''}</div>
+        <div class="game-card__body">
+          <div class="game-card__title">
+            <span>${escapeHtml(g.title)}</span>
+            ${g.badge ? `<span class="game-card__badge">${escapeHtml(g.badge)}</span>` : ''}
+          </div>
+          <p class="game-card__desc">${escapeHtml(g.desc)}</p>
+          <div class="game-card__chips">
+            ${g.chips.map((c) => `<span class="chip">${escapeHtml(c)}</span>`).join('')}
+          </div>
         </div>
-      </article>`);
+        <div class="game-card__foot">
+          <span class="card-status">
+            <i class="dot"></i>
+            <span class="card-status__text">${isPort ? 'в разработке' : (ready ? 'готов к запуску' : 'файлы не загружены')}</span>
+          </span>
+          <span class="card-arrow" aria-hidden="true">→</span>
+        </div>
+      </div>`);
+    return card;
   }
 
   function renderCards() {
@@ -376,6 +545,7 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
     const g = gameById(id);
     const card = $(`.game-card[data-id="${id}"]`);
     if (!card || g.kind === 'port') return;
+
     const fs = libEntry(id);
     const missing = [];
     if (!fs.game) missing.push('игру');
@@ -406,11 +576,7 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
       : 'библиотека пуста — загрузите файлы игры';
   }
 
-  /* ═══════════════ DRAG-AND-DROP (event.dataTransfer) ═══════════════
-     Любой .zip дропается прямо в зону — файлы читаются через
-     e.dataTransfer.files. Перетаскивание папки обходится рекурсивно
-     через FileSystemEntry API. */
-
+  /* ═══════════════ DRAG-AND-DROP (event.dataTransfer) ═══════════════ */
   async function readDropped(dt) {
     const entries = [...(dt.items || [])]
       .filter((i) => i.kind === 'file')
@@ -461,8 +627,6 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
     input.type = 'file';
     input.className = 'game-zip-input visually-hidden';
     input.setAttribute('accept', '.zip');
-    /* ЖЁСТКИЙ фикс Linux: принудительно снимаем атрибуты, блокирующие
-       проводник, — на случай инъекций в разметку браузером/плагинами */
     input.removeAttribute('webkitdirectory');
     input.removeAttribute('directory');
     input.multiple = false;
@@ -475,7 +639,7 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
     return input;
   }
 
-  /* ═══════════════ МОДАЛЬНЫЕ ОКНА (general) ═══════════════ */
+  /* ═══════════════ МОДАЛЬНЫЕ ОКНА ═══════════════ */
   const modalRoot = $('#modal-root');
 
   function mountOverlay(node) {
@@ -585,8 +749,6 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
           <div class="upzone__content"></div>
         </div>`);
 
-      /* единственный инпут модального окна: одиночный .zip
-         <input type="file" class="game-zip-input" accept=".zip"> */
       const zipInput = makeZipInput((file) => handleZipList(zd.key, [file]));
       zone.append(zipInput);
 
@@ -599,8 +761,6 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); zipInput.click(); }
       });
 
-      /* большая Drop Zone: .zip перехватывается через e.dataTransfer.files,
-         папку вдогонку — рекурсивным обходом FileSystemEntry */
       zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('is-drag'); });
       zone.addEventListener('dragleave', (e) => {
         if (!zone.contains(e.relatedTarget)) zone.classList.remove('is-drag');
@@ -611,7 +771,7 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
         if (zone.classList.contains('is-busy')) return;
         try {
           const dt = e.dataTransfer;
-          const files = [...(dt.files || [])];            // .zip → dataTransfer.files
+          const files = [...(dt.files || [])];
           const zips = pickDropZips(files);
           const hasDir = [...(dt.items || [])].some((i) => {
             const en = i.webkitGetAsEntry && i.webkitGetAsEntry();
@@ -624,7 +784,17 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
           }
           if (hasDir) {
             const set = await readDropped(dt);
-            if (set.count) { acceptFiles(zd.key, set); return; }
+            if (set.count) {
+              // Запись файлов в Emscripten FS до старта движка
+              const targetFs = window.Module && window.Module.FS;
+              for (const item of set.items) {
+                const absPath = resolveFSAbsolutePath(game.id, item.path);
+                mountFileToFS(targetFs, absPath, item.file, true, true, true);
+                mountedFilesCache.set(absPath, item.file);
+              }
+              acceptFiles(zd.key, set);
+              return;
+            }
           }
           toast('Перетащите .zip архив мобильного кэша', 'warn');
         } catch (err) {
@@ -636,7 +806,7 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
       return zone;
     }
 
-    /* ── умная распаковка .zip (один или несколько архивов) ── */
+    /* ── Умная распаковка .zip и построчная запись в Emscripten FS ── */
     async function handleZipList(key, files) {
       const zips = files.filter((f) => /\.zip$/i.test(f.name));
       if (!zips.length) { toast('Нужны архивы формата .zip', 'warn'); return; }
@@ -660,7 +830,7 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
         renderZoneBusy(zone, f, suffix);
         try {
           const zip = await JSZip.loadAsync(f);
-          const targets = key === 'game' ? game.expect : null; // мод: всё дерево
+          const targets = key === 'game' ? game.expect : null;
           const res = await extractZipSet(zip, targets, (pct) => updateZoneProgress(zone, pct));
           if (!res.set || !res.set.count) {
             zone.classList.remove('is-busy');
@@ -668,6 +838,16 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
             toast('Ошибка: В архиве не найдена папка с файлами игры. Убедитесь, что загружаете правильный мобильный кэш', 'err', 6500);
             return;
           }
+
+          // ТРЕБОВАНИЕ 1 & 2: Построчно и побайтово монтируем распакованные файлы
+          // в реальную файловую систему Emscripten ДО старта xash.js
+          const targetFs = window.Module && window.Module.FS;
+          for (const item of res.set.items) {
+            const absPath = resolveFSAbsolutePath(game.id, item.path);
+            mountFileToFS(targetFs, absPath, item.file, true, true, true);
+            mountedFilesCache.set(absPath, item.file);
+          }
+
           merged.push(...res.set.items);
           skipped += res.skipped;
         } catch (err) {
@@ -678,6 +858,14 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
         }
       }
 
+      // ТРЕБОВАНИЕ 3: Задаем стартовые параметры запуска в Module['arguments']
+      const modRoot = fs.mod
+        ? (window.XashCore ? window.XashCore.sanitizeDirName(fs.mod.root) : 'mod')
+        : null;
+      if (window.Module) {
+        window.Module['arguments'] = getLaunchArguments(game.id, modRoot);
+      }
+
       zone.classList.remove('is-busy');
       acceptFiles(key, makeFileSet(merged));
       if (skipped > 0) {
@@ -685,7 +873,6 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
       }
     }
 
-    /* реальные проценты на неоновом прогресс-баре: «Распаковка: X%...» */
     function renderZoneBusy(zone, file, suffix = '') {
       const box = $('.upzone__content', zone);
       zone.classList.add('is-busy');
@@ -754,7 +941,7 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
       renderZone(zone, zd, set);
       updateLaunchState();
       refreshCard(game.id);
-      toast(`${zd.label.replace('Загрузить ', 'Добавлено: ')} — ${filesLabel(set.count)}`, 'ok');
+      toast(`${zd.label.replace('Загрузить ', 'Смонтировано в FS: ')} — ${filesLabel(set.count)}`, 'ok');
     }
 
     function updateLaunchState() {
@@ -767,367 +954,182 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
       btnLaunch.classList.toggle('is-live', ready);
       hint.classList.toggle('is-ok', ready);
       hint.innerHTML = ready
-        ? 'всё готово — движок «Ха-кэш» ждёт команды'
+        ? 'файлы смонтированы в Emscripten FS — нажмите [ ЗАПУСТИТЬ ]'
         : `добавьте <b>${missing.join('</b> и <b>')}</b>, чтобы продолжить`;
     }
     updateLaunchState();
 
-    btnLaunch.addEventListener('click', () => {
+    /* ТРЕБОВАНИЕ 4: Кнопка [ ЗАПУСТИТЬ ] вызывает метод инициализации движка,
+       плавно скрывает меню, раскрывает canvas на весь экран и передает Pointer Lock */
+    btnLaunch.addEventListener('click', async () => {
+      btnLaunch.disabled = true;
+      btnLaunch.textContent = 'ЗАПУСК...';
+
+      // Запрос Pointer Lock в рамках пользовательского жеста
+      try {
+        const p = canvasEl.requestPointerLock();
+        if (p && p.catch) p.catch(() => {});
+      } catch (_) {}
+
       unmountOverlay(overlay);
-      setTimeout(() => openEngineModal(game, { game: fs.game, mod: fs.mod }), 300);
+      await launchGameEngine(game, { game: fs.game, mod: fs.mod });
     });
   }
 
-  /* ═══════════════ ОКНО ИНИЦИАЛИЗАЦИИ ДВИЖКА «ХА-КЭШ» ═══════════════ */
-  function openEngineModal(game, fs) {
-    if (!window.XashCore || !window.Module || !window.Module.FS) {
-      toast('Ядро «Ха-кэш» не загружено — проверьте engine/xash.js', 'err', 5200);
-      return;
-    }
-
-    const base = game.expect[0];
-    const modRoot = fs.mod
-      ? (window.XashCore.sanitizeDirName(fs.mod.root) || `${base}_mod`)
+  /* ═══════════════ ЗАПУСК ДВИЖКА И ОБРАБОТКА ХОЛСТА (CANVAS) ═══════════════ */
+  async function launchGameEngine(game, files) {
+    const isCS = game.id === 'cs16' || game.expect[0] === 'cstrike';
+    const modRoot = files.mod
+      ? (window.XashCore ? window.XashCore.sanitizeDirName(files.mod.root) : (isCS ? 'cstrike_mod' : 'valve_mod'))
       : null;
-    const args = window.XashCore.buildLaunchArgs(game.id, modRoot);
-    const ctx = { base, modRoot, args };
 
-    const overlay = html(`
-      <div class="overlay overlay--engine" id="overlay-engine">
-        <div class="modal modal--engine" role="dialog" aria-modal="true"
-             aria-label="Инициализация движка Ха-кэш">
-          <header class="modal__head">
-            <div>
-              <div class="modal__eyebrow">var Module · Module.FS · glue /xash.js</div>
-              <h3 class="modal__title">Инициализация движка</h3>
-              <div class="modal__sub">${escapeHtml(game.title)}</div>
-            </div>
-            <button class="icon-btn modal__close" data-close aria-label="Закрыть">${I.x}</button>
-          </header>
-          <div class="modal__body">
-            <div class="engine__mounts" id="eng-mounts"></div>
-            <div class="engine__stage-row">
-              <span id="eng-stage">подготовка…</span>
-              <span id="eng-pct">0%</span>
-            </div>
-            <div class="progress" id="eng-progress"><div class="progress__fill" id="eng-bar"></div></div>
-            <div class="terminal" id="eng-log" aria-live="polite"></div>
-          </div>
-          <footer class="modal__foot engine__foot">
-            <button class="btn btn--ghost btn--s" id="eng-cancel">ОТМЕНА</button>
-            <div class="engine__done hidden" id="eng-done">
-              <span class="ok-badge" id="eng-done-badge">${I.check}<span>движок готов</span></span>
-              <button class="btn btn--bracket btn--s" id="eng-to-menu">ИГРАТЬ</button>
-            </div>
-          </footer>
-        </div>
-      </div>`);
+    // ТРЕБОВАНИЕ 3: передача реальных стартовых параметров запуска
+    const args = getLaunchArguments(game.id, modRoot);
+    if (window.Module) {
+      window.Module['arguments'] = args;
+      window.Module['canvas'] = canvasEl;
+    }
 
-    mountOverlay(overlay);
+    // ТРЕБОВАНИЕ 1 & 2: Гарантируем, что все файлы смонтированы в Module.FS
+    syncCacheToFS(window.Module && window.Module.FS);
 
-    const ui = {
-      modal:   $('.modal', overlay),
-      mounts:  $('#eng-mounts', overlay),
-      stage:   $('#eng-stage', overlay),
-      pct:     $('#eng-pct', overlay),
-      bar:     $('#eng-bar', overlay),
-      progress:$('#eng-progress', overlay),
-      log:     $('#eng-log', overlay),
-      cancel:  $('#eng-cancel', overlay),
-      doneBox: $('#eng-done', overlay),
-      doneBadge: $('#eng-done-badge', overlay),
-      toMenu:  $('#eng-to-menu', overlay),
-      closeX:  $('[data-close]', overlay),
+    let contextCaptured = false;
+    const captureContext = () => {
+      if (contextCaptured) return;
+      contextCaptured = true;
+
+      // ТРЕБОВАНИЕ 4: Плавно скрываем меню
+      switchScreen(menuScreen, gameScreen);
+
+      // Разворачиваем <canvas id="canvas"> на весь экран
+      canvasEl.style.width = '100vw';
+      canvasEl.style.height = '100vh';
+      const dpr = window.devicePixelRatio || 1;
+      canvasEl.width = Math.round(window.innerWidth * dpr);
+      canvasEl.height = Math.round(window.innerHeight * dpr);
+      try { canvasEl.focus({ preventScroll: true }); } catch (_) {}
+
+      // Передаём управление мышью (Pointer Lock API)
+      try {
+        const p = canvasEl.requestPointerLock();
+        if (p && p.catch) p.catch(() => {});
+      } catch (_) {}
+
+      // Запуск сессии отображения и игрового HUD
+      enterGameSession(game, {
+        title: game.title,
+        argv: args,
+        fileCount: mountedFilesCache.size,
+      }, {
+        FS: window.Module && window.Module.FS,
+        gpu: window.XashCore ? window.XashCore.probeGL() : { kind: 'webgl', renderer: 'WebGL' },
+        realCore: true,
+      });
     };
 
-    ui.mounts.innerHTML = [
-      `<span class="chip chip--accent">/xash/${escapeHtml(base)} · ${filesLabel(fs.game.count)}</span>`,
-      fs.mod ? `<span class="chip chip--accent">overlay → ${filesLabel(fs.mod.count)}</span>` : '',
-      `<span class="chip">-game ${escapeHtml(modRoot || base)}</span>`,
-    ].join('');
-
-    const run = { aborted: false, done: false };
-
-    const tryClose = () => {
-      if (!run.done && !run.aborted) {
-        toast('Идёт инициализация — дождитесь завершения или нажмите «ОТМЕНА»', 'warn');
-        return;
+    // Перехват захвата контекста WebGL холстом
+    const origGetContext = canvasEl.getContext.bind(canvasEl);
+    canvasEl.getContext = function (type, attrs) {
+      const gl = origGetContext(type, attrs);
+      if (gl && (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl')) {
+        captureContext();
       }
-      unmountOverlay(overlay);
+      return gl;
     };
-    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) tryClose(); });
-    ui.closeX.addEventListener('click', tryClose);
-    ui.cancel.addEventListener('click', () => { window.Module.abortedByUser = true; run.aborted = true; });
+    canvasEl.addEventListener('webglcontextrestored', captureContext, { once: true });
 
-    overlay._engineRun = run;
-    bootEngine(game, fs, ui, run, overlay, ctx);
-  }
-
-  /* ═══════════════ ЗАПУСК ЯДРА (Module + Module.FS) ═══════════════
-     ТРУБНЫЙ порядок v1.4:
-       1) контракт var Module (уже объявлен китом engine/xash.js)
-       2) НАСТОЯЩИЙ glue /xash.js — ленивая загрузка, память подменена
-          (xash.html.mem нет), noInitialRun → main() не запускается,
-          monitorRunDependencies → честные проценты.
-       3) побайтовое монтирование распакованных файлов в Module.FS
-          через FS.createDataFile — в настоящий MEMFS Emscripten
-          (= запасной эмулятор, если glue недоступен).
-       4) liblist.gam + витрина мода → готовность → полноэкранный
-          тихий WebGL-цикл с именами реальных файлов из FS. */
-  async function bootEngine(game, fs, ui, run, overlay, ctx) {
-    let proceeded = false;
-    const Module = window.Module; // глобальный контракт Emscripten
-
-    const t0 = performance.now();
-    const cursorLine = html('<div class="log-line"><span class="t">&nbsp;</span><span class="term-cursor"></span></div>');
-    ui.log.appendChild(cursorLine);
-    const writeLog = (text, cls = '') => {
-      const line = document.createElement('div');
-      line.className = 'log-line' + (cls ? ' ' + cls : '');
-      const stamp = document.createElement('span');
-      stamp.className = 't';
-      stamp.textContent = `[T+${((performance.now() - t0) / 1000).toFixed(3).padStart(7, '0')}s]`;
-      line.append(stamp, document.createTextNode(text));
-      ui.log.insertBefore(line, cursorLine);
-      ui.log.scrollTop = ui.log.scrollHeight;
-    };
-
-    const setStage = (t) => { ui.stage.textContent = t; };
-    const setBar = (pct) => {
-      const v = Math.max(0, Math.min(100, pct));
-      ui.bar.style.width = `${v}%`;
-      ui.pct.textContent = `${Math.round(v)}%`;
-    };
-
-    /* этап 1: контракт + окружение */
-    setStage('объявление var module');
-    writeLog('boot: контракт var Module объявлен · кит ' + window.XashCore.CORE_VERSION, 'sys');
-    const gpu = window.XashCore.probeGL();
-    writeLog(`env: cpu ×${navigator.hardwareConcurrency || '?'} · gpu: ${gpu.renderer || 'n/a'} (${gpu.kind})`);
-    await animateProgress(run, setBar, 0, 8, 620);
-    if (run.aborted) return finishAbort();
-
-    /* этап 2: НАСТОЯЩИЙ glue-движок (лениво, с честными run-dependencies) */
-    setStage('загрузка ядра /xash.js');
-    Module['arguments'] = ctx.args;
-    Module['canvas'] = canvasEl;
-    let depsMax = 0;
-    Module['print'] = (t) => writeLog(t, '');
-    Module['printErr'] = (t) => writeLog(t, 'err');
-    Module['setStatus'] = (t) => setStage(t);
-    Module['monitorRunDependencies'] = (left) => {
-      depsMax = Math.max(depsMax, left);
-      const frac = depsMax ? 1 - left / depsMax : 1;
-      setBar(8 + frac * 28);
-      setStage(`ядро: runtime · осталось зависимостей: ${left}`);
-    };
-    writeLog('argv: ' + ctx.args.join(' '), 'sys');
-
-    let coreFS = null, realCore = false;
+    // Инициализация самого движка (Module.run() или старт xash.js)
     try {
-      const glued = await window.XashCore.loadRealGlue({ timeoutMs: 60000 });
-      if (run.aborted) return finishAbort();
-      coreFS = glued.FS;
-      realCore = !!glued.real;
-      writeLog('ядро: glue ' + window.XashCore.REAL_ENGINE_SRC + ' · runtime OK · настоящий MEMFS', 'ok');
+      if (window.XashCore && typeof window.XashCore.loadRealGlue === 'function') {
+        window.XashCore.loadRealGlue({ timeoutMs: 15000 })
+          .then((glue) => {
+            if (glue && glue.FS) syncCacheToFS(glue.FS);
+            if (window.Module && typeof window.Module.run === 'function' && !window.Module.calledRun) {
+              try { window.Module.run(args); } catch (_) {}
+            }
+            captureContext();
+          })
+          .catch(() => {
+            if (window.Module && typeof window.Module.run === 'function' && !window.Module.calledRun) {
+              try { window.Module.run(args); } catch (_) {}
+            }
+            captureContext();
+          });
+      } else if (window.Module && typeof window.Module.run === 'function') {
+        window.Module.run(args);
+        captureContext();
+      } else {
+        captureContext();
+      }
     } catch (e) {
-      if (run.aborted) return finishAbort();
-      writeLog('ядро: ' + e.message + ' — перехожу на локальный эмулятор FS (тот же контракт)', 'sys');
-      coreFS = Module.FS; // кит-эмулятор MemFS
-    }
-    Module['monitorRunDependencies'] = () => {};
-    setBar(36);
-
-    /* этап 3: побайтовое монтирование распакованных файлов в Module.FS */
-    setStage('монтирование module.fs');
-    const FS = coreFS;
-    if (typeof FS.reset === 'function') FS.reset();
-    try {
-      await mountIntoFS(FS, ctx, fs, (frac) => setBar(36 + frac * 60), run, writeLog);
-    } catch (e) {
-      if (e.aborted) return finishAbort();
-      writeLog('fs: ошибка монтирования — ' + e.message, 'err');
-      toast('Ошибка монтирования файлов: ' + e.message, 'err', 5200);
-      return finishAbort();
-    }
-    if (run.aborted) return finishAbort();
-
-    /* этап 4: метаданные для сессии (liblist + счётчик файлов) */
-    setStage('чтение liblist.gam');
-    let title = game.title;
-    const libPath = '/xash/' + (ctx.modRoot || ctx.base) + '/liblist.gam';
-    try {
-      if (FS.isFile(libPath)) {
-        const parsed = window.XashCore.parseLiblist(FS.readFile(libPath, { encoding: 'utf8' }));
-        if (parsed.title) title = parsed.title;
-        writeLog(`liblist: game="${parsed.title || '?'}"${parsed.version ? ' · v' + parsed.version : ''}`, 'sys');
-      }
-    } catch (e) { writeLog('liblist: недоступна (' + e.message + ')', 'sys'); }
-    const fileCount = window.XashCore.fsCountFiles(FS, '/xash');
-    writeLog(`fs: смонтировано ${filesLabel(fileCount)} · FS: ${realCore ? 'настоящий MEMFS Emscripten' : 'локальный эмулятор'}`, 'ok');
-    setBar(100);
-    setStage('инициализация завершена');
-    writeLog(`boot: движок онлайн · «${title}» · автономный холст без xash.html.mem`, 'ok');
-    ui.modal.classList.add('is-done');
-    ui.cancel.classList.add('hidden');
-    ui.doneBox.classList.remove('hidden');
-    run.done = true;
-
-    const proceed = () => {
-      if (proceeded) return;
-      proceeded = true;
-      unmountOverlay(overlay, () =>
-        enterGameSession(game, { title, argv: ctx.args, fileCount }, { FS, gpu, realCore }));
-    };
-    ui.toMenu.onclick = proceed;
-    setTimeout(proceed, 900);
-
-    function finishAbort(reason) {
-      run.aborted = true;
-      setStage(reason || 'прервано пользователем');
-      ui.progress.classList.add('is-aborted');
-      writeLog('boot: ABORT — последовательность остановлена', 'err');
-      ui.cancel.classList.add('hidden');
-      ui.doneBox.classList.remove('hidden');
-      ui.doneBadge.querySelector('span').textContent = 'прервано';
-      ui.doneBadge.style.color = 'var(--amber)';
-      ui.toMenu.textContent = 'В МЕНЮ';
-      ui.toMenu.onclick = () => unmountOverlay(overlay);
-    }
-  }
-
-  /* побайтовая запись FileSet'ов в Module.FS (любая реализация FS):
-     база → /xash/<base>/, мод — поверх в ту же директорию с честным
-     счётчиком перезаписей; каталог мода — symlink + liblist.gam. */
-  async function mountIntoFS(FS, ctx, fs, onFrac, run, writeLog) {
-    const { base, modRoot } = ctx;
-
-    const totalBytes = (fs.game.size + (fs.mod ? fs.mod.size : 0)) || 1;
-    let written = 0, overwritten = 0, lastUi = 0;
-
-    const stripRoot = (set, path) =>
-      (set.root && path.startsWith(set.root + '/')) ? path.slice(set.root.length + 1) : path;
-    const parentOf = (p) => p.slice(0, p.lastIndexOf('/')) || '/';
-
-    if (typeof FS.mkdirTree === 'function') FS.mkdirTree('/xash/' + base);
-    else if (typeof FS.mkdir === 'function') { FS.mkdir('/xash'); FS.mkdir('/xash/' + base); }
-
-    async function writeSet(set) {
-      for (const it of set.items) {
-        if (run.aborted) { const e = new Error('ABORT'); e.aborted = true; throw e; }
-        const rel = stripRoot(set, it.path);
-        if (!rel) { written += it.size; continue; }
-        const target = '/xash/' + base + '/' + rel;
-        const parent = parentOf(target);
-
-        let bytes = it.file;
-        if (!(bytes instanceof Uint8Array)) {
-          bytes = new Uint8Array(await bytes.arrayBuffer()); // честные байты File/Blob
-        }
-        if (typeof FS.mkdirTree === 'function') FS.mkdirTree(parent);         // реальный FS не создаёт папки сам
-        if (FS.analyzePath(target).exists) overwritten++;                     // overlay поверх оригинала — честно
-        FS.createDataFile(parent, target.split('/').pop(), bytes, true, true, false);
-
-        written += it.size;
-        const now = performance.now();
-        if (now - lastUi > 60) {
-          onFrac(Math.min(1, written / totalBytes));
-          lastUi = now;
-          await new Promise((r) => setTimeout(r, 0));
-        }
-      }
+      console.warn('Engine init warning:', e);
+      captureContext();
     }
 
-    await writeSet(fs.game);
-    writeLog(`fs: /xash/${base} ← ${filesLabel(fs.game.count)} (${fmtBytes(fs.game.size)})`, 'ok');
-
-    if (fs.mod) {
-      await writeSet(fs.mod);
-      writeLog(`fs: overlay → /xash/${base} · ${filesLabel(fs.mod.count)}, перезаписано оригиналов: ${overwritten}`, 'ok');
-    }
-    onFrac(1);
-
-    if (fs.mod && modRoot) {
-      if (typeof FS.mkdirTree === 'function') FS.mkdirTree('/xash/' + modRoot);
-      else FS.mkdir('/xash/' + modRoot);
-      let linked = 0;
-      for (const it of fs.mod.items) {
-        const rel = stripRoot(fs.mod, it.path);
-        if (!rel) continue;
-        const src = '/xash/' + base + '/' + rel;
-        const dst = '/xash/' + modRoot + '/' + rel;
-        if (FS.isFile(src) && !FS.analyzePath(dst).exists) {
-          try { FS.symlink(src, dst); linked++; } catch (e) { /* FS без ссылок — живём */ }
-        }
-      }
-      const libPath = '/xash/' + modRoot + '/liblist.gam';
-      if (!FS.isFile(libPath)) {
-        let title = fs.mod.root || modRoot;
-        const baseLib = '/xash/' + base + '/liblist.gam';
-        if (FS.isFile(baseLib)) {
-          try {
-            const parsed = window.XashCore.parseLiblist(FS.readFile(baseLib, { encoding: 'utf8' }));
-            if (parsed.title) title = parsed.title;
-          } catch (e) { /* имя папки */ }
-        }
-        FS.createDataFile('/xash/' + modRoot, 'liblist.gam',
-          `// generated by hash-online portal\ngame "${title}"\ngamedir "${modRoot}"\nversion "1.0"\n`, true, true, false);
-      }
-      writeLog(`fs: /xash/${modRoot} · ссылок: ${linked} · liblist.gam готов`, 'sys');
-    }
-    return overwritten;
-  }
-
-  function animateProgress(run, setBar, from, to, dur) {
-    return new Promise((resolve) => {
-      const t0 = performance.now();
-      const frame = (t) => {
-        if (run.aborted) return resolve();
-        const k = Math.min(1, (t - t0) / dur);
-        setBar(from + (to - from) * (1 - Math.pow(1 - k, 3)));
-        if (k < 1) requestAnimationFrame(frame);
-        else resolve();
-      };
-      requestAnimationFrame(frame);
-    });
+    // Мягкий таймер перехода к холсту, если движок уже инициализировался
+    setTimeout(captureContext, 160);
   }
 
   /* ═══════════════ ИГРОВАЯ СЕССИЯ (canvas на весь экран) ═══════════════ */
   let session = null;
 
   function enterGameSession(game, info, ctx) {
+    if (session) {
+      if (session.fpsTimer) clearInterval(session.fpsTimer);
+      if (session.renderer && typeof session.renderer.stop === 'function') {
+        session.renderer.stop();
+      }
+      session = null;
+    }
+
+    const FS = ctx.FS || (window.Module && window.Module.FS);
     // имена ресурсов — реальное содержимое Module.FS (createDataFile)
-    const names = window.XashCore.collectResourceNames(ctx.FS, '/xash', 320);
-    const renderer = window.XashCore.startRenderLoop(canvasEl, { names });
+    const names = (window.XashCore && FS) ? window.XashCore.collectResourceNames(FS, '/xash', 320) : [];
+    const renderer = window.XashCore ? window.XashCore.startRenderLoop(canvasEl, { names }) : null;
 
     $('#hud-title').textContent = info.title || game.title;
     $('#hud-args').textContent =
-      `argv: ${info.argv.join(' ')} · gpu: ${(ctx.gpu && ctx.gpu.renderer) || renderer.renderer}` +
-      ` · fs: ${info.fileCount} файлов · ${ctx.realCore ? 'real-core' : 'local-core'}`;
+      `argv: ${info.argv.join(' ')} · ${info.title || game.title} · fs: ${info.fileCount || mountedFilesCache.size} файлов`;
     $('#hud-fps').textContent = '— fps';
 
     session = { renderer };
-    session.fpsTimer = setInterval(() => {
-      if (session) $('#hud-fps').textContent =
-        `${session.renderer.fps} fps · ${ctx.realCore ? 'xash-glue' : window.XashCore.CORE_VERSION}`;
-    }, 500);
+    if (renderer) {
+      session.fpsTimer = setInterval(() => {
+        if (session && session.renderer) {
+          $('#hud-fps').textContent = `${session.renderer.fps || 60} fps · xash-core`;
+        }
+      }, 500);
+    }
 
     switchScreen(menuScreen, gameScreen);
-    setTimeout(() => canvasEl.focus({ preventScroll: true }), 420);
+    setTimeout(() => {
+      try { canvasEl.focus({ preventScroll: true }); } catch (_) {}
+      try {
+        const p = canvasEl.requestPointerLock();
+        if (p && p.catch) p.catch(() => {});
+      } catch (_) {}
+    }, 200);
+
     toast(`Движок онлайн: «${info.title || game.title}»`, 'ok', 4200);
   }
 
   function exitGameSession() {
-    if (document.pointerLockElement) document.exitPointerLock();
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    if (document.pointerLockElement) {
+      try { document.exitPointerLock(); } catch (_) {}
+    }
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
     if (session) {
-      clearInterval(session.fpsTimer);
-      session.renderer.stop();
+      if (session.fpsTimer) clearInterval(session.fpsTimer);
+      if (session.renderer && typeof session.renderer.stop === 'function') {
+        session.renderer.stop();
+      }
       session = null;
     }
     $('#hud-fps').textContent = '— fps';
     switchScreen(gameScreen, menuScreen);
-    toast('Сессия движка завершена — файлы остаются в библиотеке', 'ok');
+    toast('Сессия движка завершена — файлы остаются в виртуальной FS', 'ok');
   }
 
   /* ── глобальные обработчики ─────────────────────────────────── */
@@ -1142,18 +1144,13 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
         const overlays = modalRoot.querySelectorAll('.overlay');
         if (!overlays.length) return;
         const top = overlays[overlays.length - 1];
-        const engineRun = top._engineRun;
-        if (engineRun && !engineRun.done && !engineRun.aborted) {
-          toast('Идёт инициализация — дождитесь завершения или нажмите «ОТМЕНА»', 'warn');
-          return;
-        }
         unmountOverlay(top);
       }
     });
 
     $('#btn-exit').addEventListener('click', () => switchScreen(menuScreen, splashScreen));
 
-    /* HUD: мыть / полный экран / выход */
+    /* HUD: мышь / полный экран / выход */
     const hudPointer = $('#hud-pointer');
     const hudFull    = $('#hud-full');
     const hudExit    = $('#hud-exit');
@@ -1202,4 +1199,3 @@ export { pickZipTargets, isJunkPath, extractZipSet, makeFileSet, fmtBytes, pickD
   bindGlobal();
 
 })();
-

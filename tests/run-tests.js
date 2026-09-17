@@ -222,6 +222,37 @@ function fakeZip(files) {
     ok('crc32: "crc32" → afabd35e (= zlib.crc32)', Engine.crc32(Buffer.from('crc32')).toString(16) === 'afabd35e', Engine.crc32(Buffer.from('crc32')).toString(16));
   }
 
+  /* ── 13b. Emscripten FS bridge & arguments (app.js) ── */
+  {
+    ok('app-args: CS 1.6 arguments match',
+      JSON.stringify(app.getLaunchArguments('cs16')) === JSON.stringify(['-game', 'cstrike', '-dev', '3', '-log']));
+    ok('app-args: Half-Life arguments match',
+      JSON.stringify(app.getLaunchArguments('hl1')) === JSON.stringify(['-dev', '3', '-log']));
+
+    ok('app-paths: Half-Life prefix is /xash/valve/',
+      app.resolveFSAbsolutePath('hl1', 'valve/models/player.mdl') === '/xash/valve/models/player.mdl');
+    ok('app-paths: Half-Life relative without prefix is /xash/valve/',
+      app.resolveFSAbsolutePath('hl1', 'sound/weapons/cbar_hit1.wav') === '/xash/valve/sound/weapons/cbar_hit1.wav');
+    ok('app-paths: CS 1.6 prefix is /xash/cstrike/',
+      app.resolveFSAbsolutePath('cs16', 'cstrike/models/player/terror.mdl') === '/xash/cstrike/models/player/terror.mdl');
+    ok('app-paths: CS 1.6 relative without prefix is /xash/cstrike/',
+      app.resolveFSAbsolutePath('cs16', 'maps/de_dust2.bsp') === '/xash/cstrike/maps/de_dust2.bsp');
+
+    const testFS = freshFS();
+    testFS.reset();
+    app.ensureFSDirectory(testFS, '/xash/cstrike/models/player/urban');
+    ok('app-fs: ensureFSDirectory creates recursive directories',
+      testFS.isDir('/xash') && testFS.isDir('/xash/cstrike') && testFS.isDir('/xash/cstrike/models/player/urban'));
+
+    const testBytes = new Uint8Array([42, 43, 44]);
+    app.mountFileToFS(testFS, '/xash/cstrike/models/player/urban/urban.mdl', testBytes);
+    ok('app-fs: mountFileToFS creates file in Emscripten FS',
+      testFS.isFile('/xash/cstrike/models/player/urban/urban.mdl'));
+    const readBack = testFS.readFile('/xash/cstrike/models/player/urban/urban.mdl');
+    ok('app-fs: mountFileToFS data matches Uint8Array',
+      readBack.length === 3 && readBack[0] === 42 && readBack[1] === 43 && readBack[2] === 44);
+  }
+
   /* ── 14. run(): полный boot со смонтированной FS ── */
   {
     const Module = Engine.Module;
