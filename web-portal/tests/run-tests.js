@@ -357,6 +357,11 @@ function fakeZip(files) {
       'нет класса');
     ok('linux-fix: ветка drop берёт файлы из e.dataTransfer.files',
       srcApp.includes('dt.files') && srcApp.includes('e.dataTransfer'));
+    ok('linux-fix: multiple не выставляется (только одиночный файл)',
+      !/multiple\s*=\s*true/.test(srcApp) && !/multiple\s*=/.test(srcHtml)
+      && /input\.multiple\s*=\s*false/.test(srcApp));
+    ok('linux-fix: runtime-guard принудительно снимает атрибуты проводника',
+      srcApp.includes("removeAttribute('webkitdirectory')") && srcApp.includes("removeAttribute('directory')"));
     ok('linux-fix: прогресс «Распаковка: X%»',
       /Распаковка\$\{suffix\}: |Распаковка: /.test(srcApp));
   }

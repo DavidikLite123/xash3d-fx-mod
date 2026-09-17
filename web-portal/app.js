@@ -456,6 +456,11 @@
     input.type = 'file';
     input.className = 'game-zip-input visually-hidden';
     input.setAttribute('accept', '.zip');
+    /* ЖЁСТКИЙ фикс Linux: принудительно снимаем атрибуты, блокирующие
+       проводник, — на случай инъекций в разметку браузером/плагинами */
+    input.removeAttribute('webkitdirectory');
+    input.removeAttribute('directory');
+    input.multiple = false;
     input.addEventListener('change', () => {
       try {
         const file = input.files && input.files[0];
