@@ -367,7 +367,7 @@ function fakeZip(files) {
   }
 
   /* ── 21. (опционально) смоук настоящего /xash.js ── */
-  const realGlue = path.join(__dirname, '..', '..', 'xash.js');
+  const realGlue = path.join(__dirname, '..', 'xash.js');
   if (!process.env.SKIP_REAL_ENGINE && require('fs').existsSync(realGlue)) {
     try {
       const { spawnSync } = require('child_process');

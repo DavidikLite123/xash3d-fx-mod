@@ -67,10 +67,10 @@ global.self = global.window;
 window.navigator = { userAgent: 'node-smoke', hardwareConcurrency: 4 };
 
 (async () => {
-  console.log('загружаю', path.join(__dirname, '..', '..', 'xash.js'), '…');
+  console.log('загружаю', path.join(__dirname, '..', 'xash.js'), '…');
   const t0 = Date.now();
   const vm = require('vm');
-  const src = require('fs').readFileSync(path.join(__dirname, '..', '..', 'xash.js'), 'utf8');
+  const src = require('fs').readFileSync(path.join(__dirname, '..', 'xash.js'), 'utf8');
   /* оцениваем в ГЛОБАЛЬНОМ контексте — как <script src="xash.js">:
      тогда glue увидит наш глобальный var Module (require() был бы
      обёрткой модуля и спрятал бы его за локальной var Module) */
