@@ -1,2 +1,5 @@
-# xash3d-fx-mod
-Custom modern web-frontend and FX-modification for Xash3D (GoldSrc Engine / CS 1.6) running perfectly on Raspberry Pi 5. Features responsive layout, custom animated loading screens, and standalone asset validation.
+# Hash Online
+
+Автономный веб-фронтенд и FX-модификация для браузерного движка «Ха-кэш» (кроссплатформенный web/wasm-порт: десктоп и мобильные устройства). Адаптивная вёрстка, анимированные экраны загрузки, умная распаковка и валидация мобильного кэша (.zip любого размера с фильтрацией целевых папок).
+
+Смотри [`web-portal/`](web-portal/README.md).

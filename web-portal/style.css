@@ -1,6 +1,6 @@
 /* ════════════════════════════════════════════════════════════════
-   HASH ONLINE · веб-портал для движка «Ха-кэш» (Xash3D / GoldSrc)
-   Целевая платформа: Chrome ARM64 · Raspberry Pi 5
+   HASH ONLINE · веб-портал для движка «Ха-кэш»
+   Кроссплатформенный браузерный клиент (десктоп / мобильные устройства)
    Все анимации — только transform/opacity (GPU-friendly)
    ════════════════════════════════════════════════════════════════ */
 
@@ -27,9 +27,9 @@
   /* акцент по умолчанию (карточки/модалки переопределяют --accent) */
   --accent: var(--mint);
 
-  /* типографика */
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --disp: "Russo One", "JetBrains Mono", ui-monospace, sans-serif;
+  /* типографика (только системные стеки — портал полностью автономен) */
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --disp: "Arial Black", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
 
   /* геометрия */
   --radius:   14px;
@@ -162,6 +162,7 @@ kbd {
 /* ── неоновый логотип ── */
 .logo {
   font-family: var(--disp);
+  font-weight: 900;
   font-size: clamp(3rem, 11vw, 6.4rem);
   line-height: 1;
   letter-spacing: .04em;
@@ -301,7 +302,7 @@ kbd {
   border-bottom: 1px solid var(--line);
 }
 .menu__logo {
-  font-family: var(--disp); font-size: 19px; letter-spacing: .08em;
+  font-family: var(--disp); font-weight: 900; font-size: 19px; letter-spacing: .08em;
   color: #f2fffb;
   text-shadow: 0 0 14px rgba(0, 255, 200, .5);
 }
@@ -310,7 +311,7 @@ kbd {
 
 .menu__title { margin-bottom: 30px; }
 .menu__title h2 {
-  font-family: var(--disp); font-weight: 400;
+  font-family: var(--disp); font-weight: 800;
   font-size: clamp(1.35rem, 3.4vw, 2rem);
   letter-spacing: .04em; margin-bottom: 8px;
 }
@@ -375,7 +376,7 @@ kbd {
 .game-card__icon svg { width: 100%; height: 100%; }
 
 .game-card__title {
-  font-family: var(--disp); font-weight: 400;
+  font-family: var(--disp); font-weight: 800;
   font-size: 19px; letter-spacing: .03em;
 }
 .game-card__desc { font-size: 12px; color: var(--dim); }
@@ -522,7 +523,7 @@ body.extra-open .more-plus { transform: rotate(45deg); }
   color: var(--accent); margin-bottom: 7px;
   text-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
 }
-.modal__title { font-family: var(--disp); font-weight: 400; font-size: 20px; letter-spacing: .03em; }
+.modal__title { font-family: var(--disp); font-weight: 800; font-size: 20px; letter-spacing: .03em; }
 .modal__sub { margin-top: 5px; font-size: 11.5px; color: var(--dim); }
 .modal__close { margin: -4px -4px 0 0; }
 
@@ -590,6 +591,92 @@ body.extra-open .more-plus { transform: rotate(45deg); }
 }
 .upzone__clear svg { width: 13px; height: 13px; }
 .upzone__clear:hover { color: var(--pink); border-color: color-mix(in srgb, var(--pink) 45%, transparent); background: rgba(255, 61, 113, .08); }
+
+/* кнопка-триггер выбора .zip внутри подсказки зоны */
+.zip-trigger {
+  color: var(--cyan); font-size: inherit; letter-spacing: inherit; font-weight: 700;
+  text-decoration: underline dotted; text-underline-offset: 3px;
+  transition: color .25s, text-shadow .25s;
+}
+.zip-trigger:hover { color: #fff; text-shadow: 0 0 12px var(--cyan); }
+
+/* зона в состоянии распаковки */
+.upzone.is-busy { pointer-events: none; border-style: solid; border-color: color-mix(in srgb, var(--cyan) 55%, transparent); }
+.upzone__zipname { margin-top: 6px; font-size: 11px; color: var(--dim); overflow-wrap: anywhere; }
+.upzone__zipname b { color: var(--text); font-weight: 500; }
+.progress--s { height: 10px; margin-top: 12px; border-radius: 99px; }
+.zip-pct { color: var(--cyan); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ═══ БЛОКИ-ПОДСКАЗКИ «ГДЕ СКАЧАТЬ» / «КАТАЛОГ МОДОВ» ═══════════ */
+.links-block { min-width: 0; }
+
+.link-strip {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 14px;
+  font-size: 12px; letter-spacing: .04em; color: var(--dim);
+  text-align: left;
+  border: 1px dashed var(--line-2); border-radius: var(--radius-s);
+  background: rgba(53, 201, 255, .025);
+  transition: color .25s, border-color .3s, background .3s, box-shadow .3s;
+}
+.link-strip:hover {
+  color: var(--text); border-color: var(--cyan);
+  background: rgba(53, 201, 255, .06);
+  box-shadow: 0 0 22px -10px var(--cyan);
+}
+.link-strip b { color: var(--cyan); font-weight: 700; transition: text-shadow .25s; }
+.link-strip:hover b { text-shadow: 0 0 12px var(--cyan); }
+.link-strip .ls-emoji { flex: 0 0 auto; }
+.link-strip .ls-arrow { margin-left: auto; color: var(--faint); transition: transform .35s var(--ease-back), color .25s; }
+.link-strip[aria-expanded="true"] { border-style: solid; border-color: color-mix(in srgb, var(--cyan) 45%, transparent); color: var(--text); }
+.link-strip[aria-expanded="true"] .ls-arrow { transform: rotate(180deg); color: var(--cyan); }
+
+/* плавно раскрывающаяся панель (техника grid-template-rows: 0fr → 1fr) */
+.link-panel { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .45s var(--ease-out); }
+.link-panel.is-open { grid-template-rows: 1fr; }
+.link-panel > .lp-clip { overflow: hidden; min-height: 0; }
+
+.link-panel__box {
+  margin-top: 10px; padding: 13px 13px 12px;
+  display: grid; gap: 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--cyan);
+  border-radius: var(--radius-s);
+  background: rgba(53, 201, 255, .035);
+}
+.panel-note {
+  font-size: 11px; line-height: 1.65; color: var(--faint);
+  padding: 0 2px 4px;
+  border-bottom: 1px dashed var(--line);
+}
+.panel-note b { color: var(--dim); font-weight: 500; }
+
+/* внешняя ссылка */
+.ext-link {
+  position: relative;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 9px 34px 9px 12px;
+  color: var(--text); text-decoration: none;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: rgba(8, 13, 24, .5);
+  transition: border-color .25s, background .25s, transform .25s var(--ease-out), box-shadow .25s;
+}
+.ext-link:hover {
+  border-color: color-mix(in srgb, var(--cyan) 55%, transparent);
+  background: rgba(53, 201, 255, .07);
+  transform: translateX(4px);
+  box-shadow: 0 0 20px -10px var(--cyan);
+}
+.ext-link::after {
+  content: "↗"; position: absolute; right: 12px; top: 9px;
+  color: var(--faint); font-size: 13px;
+  transition: color .25s, transform .25s var(--ease-back);
+}
+.ext-link:hover::after { color: var(--cyan); transform: translate(2px, -2px); }
+.ext-link__host { font-size: 9.5px; letter-spacing: .22em; text-transform: uppercase; color: var(--cyan); opacity: .85; }
+.ext-link__title { font-size: 12.5px; font-weight: 700; letter-spacing: .03em; }
+.ext-link__desc { font-size: 11px; color: var(--dim); }
 
 /* ═══ ОКНО ДВИЖКА «ХА-КЭШ» (прогресс загрузки) ════════════════ */
 .modal--engine { width: min(640px, 100%); --accent: var(--mint); }
@@ -731,7 +818,7 @@ body.extra-open .more-plus { transform: rotate(45deg); }
 @keyframes orb-a { from { transform: translate(0, 0) scale(1); } to { transform: translate(6vmax, 4vmax) scale(1.15); } }
 @keyframes orb-b { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(-5vmax, -6vmax) scale(.95); } }
 
-/* ═══ АДАПТИВ (Chrome ARM64: планшеты, тач, малые экраны) ══════ */
+/* ═══ АДАПТИВ (тач-устройства, планшеты, малые экраны) ══════════ */
 @media (max-width: 720px) {
   body { font-size: 14px; }
   .menu { width: calc(100% - 28px); padding-top: 20px; }
