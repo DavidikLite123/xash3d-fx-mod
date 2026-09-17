@@ -1,24 +1,24 @@
 #!/usr/bin/env node
 /* ════════════════════════════════════════════════════════════════
-   ХА-КЭШ · server.js — автономный dev-сервер портала Hash Online
-   Ноль зависимостей (только стандартная библиотека Node.js).
+   HASH ONLINE · server.js/dev-server — автономный dev-сервер портала
+   Ноль зависимостей (только стандартная библиотека Node.js, ESM).
 
-   Зачем: официальный wasm-порт движка требует изолированного
-   окружения (SharedArrayBuffer), поэтому сервер отдаёт заголовки
-   COOP/COEP и корректный MIME для .wasm уже сейчас.
+   Зачем: оригинальный asm.js-порт Xash3D отдаёт статику из корня
+   репозитория (index.html, app.js, xash.js, xash.html.mem, server.js,
+   client.js, menu.js, vendor/), поэтому сервер:
+     · раздаёт корень как есть,
+     · ставит COOP/COEP (изолированное окружение),
+     · отдаёт корректный MIME для .mem / .wasm / .js.
 
-   Запуск:  node server.js            (порт из $PORT или 8080)
-            PORT=3000 node server.js
+   Запуск:  node dev-server.js            (порт из $PORT или 8080)
+            PORT=3000 node dev-server.js
    ════════════════════════════════════════════════════════════════ */
-'use strict';
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-
-const ROOT = __dirname;
-/* вся статика теперь в корне репозитория: index.html, app.js, engine/,
-   vendor/, а также настоящее ядро xash.js и server.js */
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8080);
 
@@ -28,6 +28,8 @@ const MIME = {
   '.mjs':  'text/javascript; charset=utf-8',
   '.css':  'text/css; charset=utf-8',
   '.wasm': 'application/wasm',
+  /* инициализатор статической памяти ядра xash.js (Module.memoryInitializerRequest) */
+  '.mem':  'application/octet-stream',
   '.json': 'application/json; charset=utf-8',
   '.map':  'application/json; charset=utf-8',
   '.svg':  'image/svg+xml',
@@ -60,9 +62,8 @@ const server = http.createServer((req, res) => {
       stat = fs.existsSync(filePath) && fs.statSync(filePath);
     }
 
-    // второй слой не нужен: вся статика (включая ядро /xash.js и /server.js)
-    // лежит прямо в корневой директории репозитория
-
+    // вся статика (включая ядро /xash.js, /xash.html.mem, /server.js,
+    // /client.js, /menu.js) лежит прямо в корневой директории репозитория
     if (!stat || !stat.isFile()) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
         .end('404 — файл не найден: ' + urlPath);
@@ -75,7 +76,7 @@ const server = http.createServer((req, res) => {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Content-Length': stat.size,
       'Cache-Control': 'no-store',
-      // изоляция окружения для будущего SharedArrayBuffer (wasm threads)
+      // изоляция окружения (SharedArrayBuffer / потоки wasm на будущее)
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Cross-Origin-Resource-Policy': 'same-origin',
@@ -90,9 +91,10 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log('┌──────────────────────────────────────────────┐');
-  console.log('│  HASH ONLINE · dev-server «Ха-кэш»           │');
+  console.log('│  HASH ONLINE · dev-server Xash3D             │');
   console.log('└──────────────────────────────────────────────┘');
   console.log(`  root (репо): ${ROOT}`);
   console.log(`  url        : http://${HOST}:${PORT}/`);
-  console.log('  coop/coep: включены · wasm mime: application/wasm');
+  console.log('  ядро       : /xash.js + /xash.html.mem + /server.js + /client.js + /menu.js');
+  console.log('  coop/coep  : включены · mime .mem/.wasm: octet-stream/application-wasm');
 });
