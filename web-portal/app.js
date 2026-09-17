@@ -444,23 +444,23 @@
     });
   }
 
-  /* ── Раздельные Linux-safe инпуты ─────────────────────────────
-     j zip-инпут БЕЗ webkitdirectory/directory (не блокирует
-     проводник Linux), отдельный инпут папки — только с ними. */
-  function makePicker(kind, onPick) {
+  /* ── ЖЁСТКОЕ ИСПРАВЛЕНИЕ ИНПУТОВ (Linux-фикс, все игры) ──────
+     Атрибуты webkitdirectory/directory удалены ПОЛНОСТЬЮ — именно
+     они блокировали проводник Linux при выборе архивов.
+     Во всех модальных окнах — строго одиночный .zip:
+       <input type="file" class="game-zip-input" accept=".zip">
+     Плюс большая Drop Zone: .zip перехватывается через
+     e.dataTransfer.files на любой глубине UX. */
+  function makeZipInput(onPick) {
     const input = document.createElement('input');
     input.type = 'file';
-    input.className = 'visually-hidden';
-    input.multiple = true;
-    if (kind === 'dir') {
-      input.setAttribute('webkitdirectory', '');
-      input.setAttribute('directory', '');
-      try { input.webkitdirectory = true; } catch (e) { /* старые движки */ }
-    } else {
-      input.setAttribute('accept', '.zip,application/zip,application/x-zip-compressed');
-    }
+    input.className = 'game-zip-input visually-hidden';
+    input.setAttribute('accept', '.zip');
     input.addEventListener('change', () => {
-      try { onPick(input.files); } finally { input.value = ''; }
+      try {
+        const file = input.files && input.files[0];
+        if (file) onPick(file);
+      } finally { input.value = ''; }
     });
     return input;
   }
@@ -517,13 +517,12 @@
     $('[data-close]', overlay).addEventListener('click', close);
 
     const zoneDefs = [{ key: 'game', label: 'Загрузить файлы игры',
-      hint: `папка мобильного кэша — <b>${game.expect[0]}/</b> · или .zip архив целиком<br>
-             перетащите сюда, нажмите для выбора папки или
-             <button type="button" class="zip-trigger">выберите .zip</button>` }];
+      hint: `.zip архив мобильного кэша — папка <b>${game.expect[0]}/</b> ищется автоматически<br>
+             перетащите архив сюда или нажмите для выбора файла` }];
     if (game.kind === 'modified') {
       zoneDefs.push({ key: 'mod', label: 'Загрузить файлы мода',
-        hint: `ресурсы модификации — модели, текстуры, спрайты<br>
-               папка или .zip архив мода · накладывается в памяти поверх кэша игры` });
+        hint: `.zip архив модификации — модели, текстуры, спрайты<br>
+               накладывается в памяти поверх кэша игры` });
     }
 
     zonesBox.appendChild(buildZone(zoneDefs[0]));
@@ -576,28 +575,22 @@
           <div class="upzone__content"></div>
         </div>`);
 
-      // два раздельных инпута: zip — без webkitdirectory (Linux-safe)
-      const dirInput = makePicker('dir', (list) => {
-        const items = [...list].map((f) => ({ file: f, path: f.webkitRelativePath || f.name, size: f.size }));
-        if (items.length) acceptFiles(zd.key, makeFileSet(items));
-      });
-      const zipInput = makePicker('zip', (list) => {
-        if (list.length) handleZipList(zd.key, [...list]);
-      });
-      zone.append(dirInput, zipInput);
+      /* единственный инпут модального окна: одиночный .zip
+         <input type="file" class="game-zip-input" accept=".zip"> */
+      const zipInput = makeZipInput((file) => handleZipList(zd.key, [file]));
+      zone.append(zipInput);
 
       zone.addEventListener('click', (e) => {
         if (zone.classList.contains('is-busy')) return;
         if (e.target.closest('.upzone__clear')) return;
-        if (e.target.closest('.zip-trigger')) { zipInput.click(); return; }
-        dirInput.click();
+        zipInput.click();
       });
       zone.addEventListener('keydown', (e) => {
-        if (e.target.closest('.zip-trigger')) return;
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); dirInput.click(); }
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); zipInput.click(); }
       });
 
-      // полноценная Drop Zone: перетаскивание .zip или папки мышью
+      /* большая Drop Zone: .zip перехватывается через e.dataTransfer.files,
+         папку вдогонку — рекурсивным обходом FileSystemEntry */
       zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('is-drag'); });
       zone.addEventListener('dragleave', (e) => {
         if (!zone.contains(e.relatedTarget)) zone.classList.remove('is-drag');
@@ -608,20 +601,22 @@
         if (zone.classList.contains('is-busy')) return;
         try {
           const dt = e.dataTransfer;
-          const files = [...(dt.files || [])]; // обработка через dataTransfer.files
+          const files = [...(dt.files || [])];            // .zip → dataTransfer.files
+          const zips = pickDropZips(files);
           const hasDir = [...(dt.items || [])].some((i) => {
             const en = i.webkitGetAsEntry && i.webkitGetAsEntry();
             return en && en.isDirectory;
           });
-          const zips = pickDropZips(files);
-          if (!hasDir && zips.length) {
+          if (zips.length) {
             if (zips.length !== files.length) toast('Смешанный дроп: обработаны только .zip архивы', 'warn');
             await handleZipList(zd.key, zips);
             return;
           }
-          const set = await readDropped(dt);
-          if (set.count) acceptFiles(zd.key, set);
-          else toast('Перетащите папку с файлами игры или .zip архив', 'warn');
+          if (hasDir) {
+            const set = await readDropped(dt);
+            if (set.count) { acceptFiles(zd.key, set); return; }
+          }
+          toast('Перетащите .zip архив мобильного кэша', 'warn');
         } catch (err) {
           toast('Не удалось прочитать файлы', 'err');
         }
@@ -680,13 +675,13 @@
       }
     }
 
-    /* прогресс: «Распаковка игровых ассетов: X%…» */
+    /* реальные проценты на неоновом прогресс-баре: «Распаковка: X%...» */
     function renderZoneBusy(zone, file, suffix = '') {
       const box = $('.upzone__content', zone);
       zone.classList.add('is-busy');
       box.innerHTML = `
         <div class="upzone__icon">${I.zip}</div>
-        <div class="upzone__label"><span class="br">[</span>&nbsp;Распаковка игровых ассетов${suffix}: <b class="zip-pct">0</b>%&nbsp;<span class="br">]</span></div>
+        <div class="upzone__label"><span class="br">[</span>&nbsp;Распаковка${suffix}: <b class="zip-pct">0</b>%&nbsp;<span class="br">]</span></div>
         <div class="upzone__zipname"><b>${escapeHtml(file.name)}</b> · ${fmtBytes(file.size)}</div>
         <div class="progress progress--s"><div class="progress__fill zip-bar" style="width:0%"></div></div>`;
     }
@@ -793,7 +788,7 @@
              aria-label="Инициализация движка Ха-кэш">
           <header class="modal__head">
             <div>
-              <div class="modal__eyebrow">var Module · Module.FS · local js-core</div>
+              <div class="modal__eyebrow">var Module · Module.FS · glue /xash.js</div>
               <h3 class="modal__title">Инициализация движка</h3>
               <div class="modal__sub">${escapeHtml(game.title)}</div>
             </div>
@@ -858,7 +853,17 @@
     bootEngine(game, fs, ui, run, overlay, ctx);
   }
 
-  /* ═══════════════ ЗАПУСК ЯДРА (Module + Module.FS) ═══════════════ */
+  /* ═══════════════ ЗАПУСК ЯДРА (Module + Module.FS) ═══════════════
+     ТРУБНЫЙ порядок v1.4:
+       1) контракт var Module (уже объявлен китом engine/xash.js)
+       2) НАСТОЯЩИЙ glue /xash.js — ленивая загрузка, память подменена
+          (xash.html.mem нет), noInitialRun → main() не запускается,
+          monitorRunDependencies → честные проценты.
+       3) побайтовое монтирование распакованных файлов в Module.FS
+          через FS.createDataFile — в настоящий MEMFS Emscripten
+          (= запасной эмулятор, если glue недоступен).
+       4) liblist.gam + витрина мода → готовность → полноэкранный
+          тихий WebGL-цикл с именами реальных файлов из FS. */
   async function bootEngine(game, fs, ui, run, overlay, ctx) {
     let proceeded = false;
     const Module = window.Module; // глобальный контракт Emscripten
@@ -884,27 +889,51 @@
       ui.pct.textContent = `${Math.round(v)}%`;
     };
 
-    /* этап 1: контракт */
-    setStage('подключение var module');
-    writeLog('boot: объявление глобального контракта Module …', 'sys');
-    await animateProgress(run, setBar, 0, 6, 500);
-    if (run.aborted) return finishAbort();
-
-    /* этап 2: окружение (реальная проба GPU) */
-    setStage('проверка окружения');
+    /* этап 1: контракт + окружение */
+    setStage('объявление var module');
+    writeLog('boot: контракт var Module объявлен · кит ' + window.XashCore.CORE_VERSION, 'sys');
     const gpu = window.XashCore.probeGL();
     writeLog(`env: cpu ×${navigator.hardwareConcurrency || '?'} · gpu: ${gpu.renderer || 'n/a'} (${gpu.kind})`);
-    await animateProgress(run, setBar, 6, 14, 550);
+    await animateProgress(run, setBar, 0, 8, 620);
     if (run.aborted) return finishAbort();
 
-    /* этап 3: РЕАЛЬНАЯ побайтовая запись в Module.FS */
-    setStage('монтирование module.fs');
-    const FS = Module.FS;
-    FS.reset();
-    FS.mkdirTree('/xash');
-    FS.mkdirTree('/xash/' + ctx.base);
+    /* этап 2: НАСТОЯЩИЙ glue-движок (лениво, с честными run-dependencies) */
+    setStage('загрузка ядра /xash.js');
+    Module['arguments'] = ctx.args;
+    Module['canvas'] = canvasEl;
+    let depsMax = 0;
+    Module['print'] = (t) => writeLog(t, '');
+    Module['printErr'] = (t) => writeLog(t, 'err');
+    Module['setStatus'] = (t) => setStage(t);
+    Module['monitorRunDependencies'] = (left) => {
+      depsMax = Math.max(depsMax, left);
+      const frac = depsMax ? 1 - left / depsMax : 1;
+      setBar(8 + frac * 28);
+      setStage(`ядро: runtime · осталось зависимостей: ${left}`);
+    };
+    writeLog('argv: ' + ctx.args.join(' '), 'sys');
+
+    let coreFS = null, realCore = false;
     try {
-      await mountIntoFS(FS, ctx, fs, (frac) => setBar(14 + frac * 34), run, writeLog);
+      const glued = await window.XashCore.loadRealGlue({ timeoutMs: 60000 });
+      if (run.aborted) return finishAbort();
+      coreFS = glued.FS;
+      realCore = !!glued.real;
+      writeLog('ядро: glue ' + window.XashCore.REAL_ENGINE_SRC + ' · runtime OK · настоящий MEMFS', 'ok');
+    } catch (e) {
+      if (run.aborted) return finishAbort();
+      writeLog('ядро: ' + e.message + ' — перехожу на локальный эмулятор FS (тот же контракт)', 'sys');
+      coreFS = Module.FS; // кит-эмулятор MemFS
+    }
+    Module['monitorRunDependencies'] = () => {};
+    setBar(36);
+
+    /* этап 3: побайтовое монтирование распакованных файлов в Module.FS */
+    setStage('монтирование module.fs');
+    const FS = coreFS;
+    if (typeof FS.reset === 'function') FS.reset();
+    try {
+      await mountIntoFS(FS, ctx, fs, (frac) => setBar(36 + frac * 60), run, writeLog);
     } catch (e) {
       if (e.aborted) return finishAbort();
       writeLog('fs: ошибка монтирования — ' + e.message, 'err');
@@ -913,46 +942,32 @@
     }
     if (run.aborted) return finishAbort();
 
-    /* этап 4: argv + boot ядра (run-dependencies → честный прогресс) */
-    setStage('module.arguments → main()');
-    Module['arguments'] = ctx.args;
-    Module['canvas'] = canvasEl;
-    writeLog('argv: ' + ctx.args.join(' '), 'sys');
-
-    let depsMax = 0;
-    Module['print'] = (t) => writeLog(t, '');
-    Module['printErr'] = (t) => writeLog(t, 'err');
-    Module['setStatus'] = (t) => setStage(t);
-    Module['monitorRunDependencies'] = (left) => {
-      depsMax = Math.max(depsMax, left);
-      const frac = depsMax ? 1 - left / depsMax : 1;
-      setBar(48 + frac * 52);
-      setStage(`ядро: main() · осталось файлов: ${left}`);
-    };
-    Module['onRuntimeInitialized'] = () => { run.done = true; };
-
-    let bootInfo;
+    /* этап 4: метаданные для сессии (liblist + счётчик файлов) */
+    setStage('чтение liblist.gam');
+    let title = game.title;
+    const libPath = '/xash/' + (ctx.modRoot || ctx.base) + '/liblist.gam';
     try {
-      bootInfo = await window.XashCore.run(Module, { shouldAbort: () => run.aborted });
-    } catch (e) {
-      if (e.aborted) return finishAbort();
-      writeLog('core: сбой — ' + e.message, 'err');
-      toast('Сбой ядра: ' + e.message, 'err', 5200);
-      return finishAbort();
-    }
-
-    /* READY → плавно скрываем модалку и выходим на холст */
+      if (FS.isFile(libPath)) {
+        const parsed = window.XashCore.parseLiblist(FS.readFile(libPath, { encoding: 'utf8' }));
+        if (parsed.title) title = parsed.title;
+        writeLog(`liblist: game="${parsed.title || '?'}"${parsed.version ? ' · v' + parsed.version : ''}`, 'sys');
+      }
+    } catch (e) { writeLog('liblist: недоступна (' + e.message + ')', 'sys'); }
+    const fileCount = window.XashCore.fsCountFiles(FS, '/xash');
+    writeLog(`fs: смонтировано ${filesLabel(fileCount)} · FS: ${realCore ? 'настоящий MEMFS Emscripten' : 'локальный эмулятор'}`, 'ok');
     setBar(100);
     setStage('инициализация завершена');
-    writeLog(`boot: движок онлайн · «${bootInfo.info.title || game.title}»`, 'ok');
+    writeLog(`boot: движок онлайн · «${title}» · автономный холст без xash.html.mem`, 'ok');
     ui.modal.classList.add('is-done');
     ui.cancel.classList.add('hidden');
     ui.doneBox.classList.remove('hidden');
+    run.done = true;
 
     const proceed = () => {
       if (proceeded) return;
       proceeded = true;
-      unmountOverlay(overlay, () => enterGameSession(game, bootInfo, { args: ctx.args, gpu }));
+      unmountOverlay(overlay, () =>
+        enterGameSession(game, { title, argv: ctx.args, fileCount }, { FS, gpu, realCore }));
     };
     ui.toMenu.onclick = proceed;
     setTimeout(proceed, 900);
@@ -971,10 +986,9 @@
     }
   }
 
-  /* побайтовая запись FileSet'ов в Module.FS:
-     база → /xash/<base>/ через FS.createDataFile,
-     мод — поверх в ту же директорию (счётчик перезаписей реальный),
-     каталог мода — symlink-дерево + liblist.gam для -game. */
+  /* побайтовая запись FileSet'ов в Module.FS (любая реализация FS):
+     база → /xash/<base>/, мод — поверх в ту же директорию с честным
+     счётчиком перезаписей; каталог мода — symlink + liblist.gam. */
   async function mountIntoFS(FS, ctx, fs, onFrac, run, writeLog) {
     const { base, modRoot } = ctx;
 
@@ -983,6 +997,10 @@
 
     const stripRoot = (set, path) =>
       (set.root && path.startsWith(set.root + '/')) ? path.slice(set.root.length + 1) : path;
+    const parentOf = (p) => p.slice(0, p.lastIndexOf('/')) || '/';
+
+    if (typeof FS.mkdirTree === 'function') FS.mkdirTree('/xash/' + base);
+    else if (typeof FS.mkdir === 'function') { FS.mkdir('/xash'); FS.mkdir('/xash/' + base); }
 
     async function writeSet(set) {
       for (const it of set.items) {
@@ -990,13 +1008,15 @@
         const rel = stripRoot(set, it.path);
         if (!rel) { written += it.size; continue; }
         const target = '/xash/' + base + '/' + rel;
+        const parent = parentOf(target);
 
         let bytes = it.file;
         if (!(bytes instanceof Uint8Array)) {
           bytes = new Uint8Array(await bytes.arrayBuffer()); // честные байты File/Blob
         }
-        if (FS.analyzePath(target).exists) overwritten++;
-        FS.createDataFile(parentOf(target), target.split('/').pop(), bytes, true, true, false);
+        if (typeof FS.mkdirTree === 'function') FS.mkdirTree(parent);         // реальный FS не создаёт папки сам
+        if (FS.analyzePath(target).exists) overwritten++;                     // overlay поверх оригинала — честно
+        FS.createDataFile(parent, target.split('/').pop(), bytes, true, true, false);
 
         written += it.size;
         const now = performance.now();
@@ -1007,7 +1027,6 @@
         }
       }
     }
-    const parentOf = (p) => p.slice(0, p.lastIndexOf('/')) || '/';
 
     await writeSet(fs.game);
     writeLog(`fs: /xash/${base} ← ${filesLabel(fs.game.count)} (${fmtBytes(fs.game.size)})`, 'ok');
@@ -1019,16 +1038,20 @@
     onFrac(1);
 
     if (fs.mod && modRoot) {
-      FS.mkdirTree('/xash/' + modRoot);
+      if (typeof FS.mkdirTree === 'function') FS.mkdirTree('/xash/' + modRoot);
+      else FS.mkdir('/xash/' + modRoot);
       let linked = 0;
       for (const it of fs.mod.items) {
         const rel = stripRoot(fs.mod, it.path);
         if (!rel) continue;
         const src = '/xash/' + base + '/' + rel;
         const dst = '/xash/' + modRoot + '/' + rel;
-        if (FS.isFile(src) && !FS.analyzePath(dst).exists) { FS.symlink(src, dst); linked++; }
+        if (FS.isFile(src) && !FS.analyzePath(dst).exists) {
+          try { FS.symlink(src, dst); linked++; } catch (e) { /* FS без ссылок — живём */ }
+        }
       }
-      if (!FS.isFile('/xash/' + modRoot + '/liblist.gam')) {
+      const libPath = '/xash/' + modRoot + '/liblist.gam';
+      if (!FS.isFile(libPath)) {
         let title = fs.mod.root || modRoot;
         const baseLib = '/xash/' + base + '/liblist.gam';
         if (FS.isFile(baseLib)) {
@@ -1062,24 +1085,26 @@
   /* ═══════════════ ИГРОВАЯ СЕССИЯ (canvas на весь экран) ═══════════════ */
   let session = null;
 
-  function enterGameSession(game, bootInfo, ctx) {
-    // имена ресурсов из виртуальной памяти — «createDataFile»-содержимое
-    const names = window.XashCore.collectResourceNames(window.Module.FS, '/xash', 320);
+  function enterGameSession(game, info, ctx) {
+    // имена ресурсов — реальное содержимое Module.FS (createDataFile)
+    const names = window.XashCore.collectResourceNames(ctx.FS, '/xash', 320);
     const renderer = window.XashCore.startRenderLoop(canvasEl, { names });
 
-    $('#hud-title').textContent = bootInfo.info.title || game.title;
+    $('#hud-title').textContent = info.title || game.title;
     $('#hud-args').textContent =
-      `argv: ${ctx.args.join(' ')} · gpu: ${(ctx.gpu && ctx.gpu.renderer) || renderer.renderer} · fs: ${bootInfo.stats.files} файлов`;
+      `argv: ${info.argv.join(' ')} · gpu: ${(ctx.gpu && ctx.gpu.renderer) || renderer.renderer}` +
+      ` · fs: ${info.fileCount} файлов · ${ctx.realCore ? 'real-core' : 'local-core'}`;
     $('#hud-fps').textContent = '— fps';
 
     session = { renderer };
     session.fpsTimer = setInterval(() => {
-      if (session) $('#hud-fps').textContent = `${session.renderer.fps} fps · ${window.XashCore.CORE_VERSION}`;
+      if (session) $('#hud-fps').textContent =
+        `${session.renderer.fps} fps · ${ctx.realCore ? 'xash-glue' : window.XashCore.CORE_VERSION}`;
     }, 500);
 
     switchScreen(menuScreen, gameScreen);
     setTimeout(() => canvasEl.focus({ preventScroll: true }), 420);
-    toast(`Движок онлайн: «${bootInfo.info.title || game.title}»`, 'ok', 4200);
+    toast(`Движок онлайн: «${info.title || game.title}»`, 'ok', 4200);
   }
 
   function exitGameSession() {

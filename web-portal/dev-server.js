@@ -17,6 +17,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = __dirname;
+/* реальные файлы движка (xash.js, server.js) лежат в корне репозитория —
+   отдаём их как второй слой статики, если файла нет в web-portal/ */
+const REPO_ROOT = path.resolve(__dirname, '..');
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 8080);
 
@@ -58,6 +61,15 @@ const server = http.createServer((req, res) => {
       stat = fs.existsSync(filePath) && fs.statSync(filePath);
     }
 
+    // второй слой: файлы из корня репозитория (настоящее ядро xash.js / server.js)
+    if ((!stat || !stat.isFile())) {
+      const alt = path.normalize(path.join(REPO_ROOT, urlPath));
+      if (alt !== filePath && alt.startsWith(REPO_ROOT) && fs.existsSync(alt)) {
+        const s2 = fs.statSync(alt);
+        if (s2 && s2.isFile()) { filePath = alt; stat = s2; }
+      }
+    }
+
     if (!stat || !stat.isFile()) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
         .end('404 — файл не найден: ' + urlPath);
@@ -87,7 +99,8 @@ server.listen(PORT, HOST, () => {
   console.log('┌──────────────────────────────────────────────┐');
   console.log('│  HASH ONLINE · dev-server «Ха-кэш»           │');
   console.log('└──────────────────────────────────────────────┘');
-  console.log(`  root : ${ROOT}`);
-  console.log(`  url  : http://${HOST}:${PORT}/`);
+  console.log(`  root     : ${ROOT}`);
+  console.log(`  repo-fallback (ядро): ${REPO_ROOT}`);
+  console.log(`  url      : http://${HOST}:${PORT}/`);
   console.log('  coop/coep: включены · wasm mime: application/wasm');
 });

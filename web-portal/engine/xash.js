@@ -39,7 +39,7 @@ var Module = (typeof Module !== 'undefined' && Module) || {
   root.XashCore = api;
 })(typeof self !== 'undefined' ? self : globalThis, function (root, Module) {
 
-  const CORE_VERSION = '1.3.0-local';
+  const CORE_VERSION = '1.4.0-local';
 
   /* ════════════════════════════════════════════════════════════
      ЧАСТЬ 1 · ЭМУЛЯЦИЯ FILESYSTEM Emscripten (Module.FS)
@@ -267,11 +267,34 @@ var Module = (typeof Module !== 'undefined' && Module) || {
   }
 
   /* имена ресурсов из виртуальной памяти — для 3D-сцены холста */
+  /* обход FS любого вкуса: наш эмулятор (walkFiles) либо настоящий
+     Emscripten FS из glue xash.js (через readdir + analyzePath) */
+  function fsWalkFiles(FS, dir) {
+    if (typeof FS.walkFiles === 'function') return [...FS.walkFiles(dir)];
+    const out = [];
+    const visit = (p) => {
+      let entries = [];
+      try { entries = FS.readdir(p) || []; } catch (e) { return; }
+      for (const name of entries) {
+        if (name === '.' || name === '..') continue;
+        const full = (p === '/' ? '' : p) + '/' + name;
+        if (FS.isDir && FS.isDir(full)) { visit(full); continue; }
+        if (FS.isFile && FS.isFile(full)) {
+          let size = 0, mtime = 0;
+          try { const st = FS.stat(full); size = st.size || 0; mtime = st.mtime || 0; } catch (e) { /* ок */ }
+          out.push({ path: full, size, mtime });
+        }
+      }
+    };
+    try { visit(dir); } catch (e) { /* пусто */ }
+    return out;
+  }
+
   function collectResourceNames(FS, dir, limit) {
     const PRIORITY = ['bsp', 'wad', 'mdl', 'spr', 'tga', 'wav', 'pak', 'cfg'];
     const seen = new Set();
     const out = [];
-    for (const f of FS.walkFiles(dir)) {
+    for (const f of fsWalkFiles(FS, dir)) {
       const base = baseName(f.path);
       if (seen.has(base.toLowerCase())) continue;
       const m = /\.([a-z0-9]+)$/i.exec(base);
@@ -282,6 +305,9 @@ var Module = (typeof Module !== 'undefined' && Module) || {
     out.sort((a, b) => (a.pri === -1 ? 99 : a.pri) - (b.pri === -1 ? 99 : b.pri) || a.name.localeCompare(b.name));
     return out.slice(0, Math.max(1, limit || 320));
   }
+
+  /* сколько файлов реально лежит в FS под dir (любая реализация) */
+  const fsCountFiles = (FS, dir) => fsWalkFiles(FS, dir).length;
 
   /* ════════════════════════════════════════════════════════════
      ЧАСТЬ 3 · BOOT ЯДРА (поверх Module.FS)
@@ -385,6 +411,80 @@ var Module = (typeof Module !== 'undefined' && Module) || {
     if (M.onRuntimeInitialized) M.onRuntimeInitialized();
 
     return { argv, gameDir, info, stats: { files, bytes, byExt, crc: { checked } } };
+  }
+
+  /* ════════════════════════════════════════════════════════════
+     РЕАЛЬНОЕ ЯДРО: ленивая загрузка glue /xash.js (Emscripten)
+
+     Файл xash.html.mem (инициализатор 67 МБ статической памяти)
+     в поставку не входит — подменяем его нулевым буфером через
+     Module['memoryInitializerRequest'], main() блокируем через
+     noInitialRun. Итог: настоящий runtime Emscripten + реальный
+     Module.FS (MEMFS), куда интерфейс пишет байты игры.
+     ════════════════════════════════════════════════════════════ */
+  const REAL_ENGINE_SRC = '/xash.js';
+  /* размер инициализатора = STATICTOP − GLOBAL_BASE glue-сборки */
+  const REAL_MEM_BYTES = 67358736 + 64;
+  let realGluePromise = null;
+
+  function loadRealGlue(opts = {}) {
+    if (realGluePromise) return realGluePromise;
+    const timeoutMs = opts.timeoutMs || 60000;
+    const M = Module;
+
+    realGluePromise = new Promise((resolve, reject) => {
+      if (typeof document === 'undefined') {
+        const e = new Error('real-glue: окружение не браузер');
+        e.fallback = true;
+        return reject(e);
+      }
+
+      /* контракт, уважаемый glue xash.js */
+      M['noInitialRun'] = true;
+      try { M['memoryInitializerRequest'] = { status: 200, response: new ArrayBuffer(REAL_MEM_BYTES) }; }
+      catch (e) { realGluePromise = null; return reject(e); }
+
+      const prevInit = M['onRuntimeInitialized'];
+      let settled = false;
+      const done = (ok, err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(to);
+        if (ok) {
+          M['onRuntimeInitialized'] = prevInit || function () {};
+          /* main() не запускаем: бинарного образа пока нет */
+          try { M['callMain'] = () => {}; } catch (e) { /* ок */ }
+          resolve({ real: true, FS: M.FS });
+        } else {
+          M['onRuntimeInitialized'] = prevInit || function () {};
+          reject(err);
+        }
+      };
+
+      const to = setTimeout(() => {
+        const e = new Error('real-glue: таймаут инициализации');
+        e.fallback = true;
+        done(false, e);
+      }, timeoutMs);
+
+      M['onRuntimeInitialized'] = () => {
+        try { if (prevInit) prevInit(); } catch (e) { /* лог позже */ }
+        done(M.FS ? true : false, new Error('real-glue: Module.FS не создан'));
+      };
+
+      const script = document.createElement('script');
+      script.async = true;
+      script.src = REAL_ENGINE_SRC;
+      script.onerror = () => {
+        const e = new Error('real-glue: не удалось загрузить ' + REAL_ENGINE_SRC);
+        e.fallback = true;
+        done(false, e);
+      };
+      document.head.appendChild(script);
+    });
+
+    realGluePromise.catch(() => { realGluePromise = null; });
+    return realGluePromise;
   }
 
   /* ════════════════════════════════════════════════════════════
@@ -763,5 +863,10 @@ var Module = (typeof Module !== 'undefined' && Module) || {
     buildLaunchArgs,
     sanitizeDirName,
     collectResourceNames,
+    fsWalkFiles,
+    fsCountFiles,
+    loadRealGlue,
+    REAL_ENGINE_SRC,
+    REAL_MEM_BYTES,
   };
 });

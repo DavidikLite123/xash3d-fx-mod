@@ -592,13 +592,9 @@ body.extra-open .more-plus { transform: rotate(45deg); }
 .upzone__clear svg { width: 13px; height: 13px; }
 .upzone__clear:hover { color: var(--pink); border-color: color-mix(in srgb, var(--pink) 45%, transparent); background: rgba(255, 61, 113, .08); }
 
-/* кнопка-триггер выбора .zip внутри подсказки зоны */
-.zip-trigger {
-  color: var(--cyan); font-size: inherit; letter-spacing: inherit; font-weight: 700;
-  text-decoration: underline dotted; text-underline-offset: 3px;
-  transition: color .25s, text-shadow .25s;
-}
-.zip-trigger:hover { color: #fff; text-shadow: 0 0 12px var(--cyan); }
+/* инпут одиночного .zip — скрыт визуально, открыт клавиатуре через зону */
+.game-zip-input { position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }
 
 /* зона в состоянии распаковки */
 .upzone.is-busy { pointer-events: none; border-style: solid; border-color: color-mix(in srgb, var(--cyan) 55%, transparent); }

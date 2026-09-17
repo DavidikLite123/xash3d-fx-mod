@@ -44,7 +44,7 @@
 
       <div class="splash__kbd">нажмите <kbd>Enter</kbd> для продолжения</div>
     </div>
-    <div class="screen-version">hash-online · portal v1.3.0 · local core</div>
+    <div class="screen-version">hash-online · portal v1.4.0 · real core</div>
   </section>
 
   <!-- ═══════════════ ЭКРАН 2 · ГЛАВНОЕ МЕНЮ ═══════════════ -->
@@ -77,7 +77,7 @@
 
       <footer class="menu__foot">
         <span id="menu-status" class="menu-status"><i class="dot"></i><span class="menu-status__text">библиотека пуста — загрузите файлы игры</span></span>
-        <span class="menu__build">xa-cache // fx-mod · local core · wasm-ready</span>
+        <span class="menu__build">xa-cache // fx-mod · glue /xash.js · memfs-mount</span>
       </footer>
     </div>
   </section>
@@ -109,7 +109,8 @@
   <!-- Уведомления -->
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
-  <!-- Локальное ядро «Ха-кэш»: var Module + Module.FS + JS-core -->
+  <!-- Кит совместимости «Ха-кэш»: var Module + Module.FS-эмулятор + рендер;
+       настоящий glue двигателя подгружается лениво из корня: /xash.js -->
   <script src="engine/xash.js"></script>
   <!-- Локальная копия JSZip (умная распаковка мобильного кэша) -->
   <script src="vendor/jszip.min.js"></script>

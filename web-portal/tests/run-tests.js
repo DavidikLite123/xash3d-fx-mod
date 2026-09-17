@@ -308,9 +308,78 @@ function fakeZip(files) {
   }
 
   /* ── 18. CORE_VERSION / контракт глобалов ── */
-  ok('core: версия 1.3.0-local', Engine.CORE_VERSION === '1.3.0-local', Engine.CORE_VERSION);
+  ok('core: версия 1.4.0-local', Engine.CORE_VERSION === '1.4.0-local', Engine.CORE_VERSION);
   ok('core: Module — объект emscripten-формы',
     ['arguments', 'preRun', 'postRun', 'print', 'printErr', 'setStatus'].every((k) => k in Engine.Module));
+  ok('core: loadRealGlue и адрес ядра экспортированы',
+    typeof Engine.loadRealGlue === 'function' && Engine.REAL_ENGINE_SRC === '/xash.js');
+
+  /* ── 19. fsWalkFiles: настоящий Emscripten FS (без walkFiles) ── */
+  {
+    /* мок MEMFS: только readdir/isDir/isFile/stat — как в glue xash.js */
+    const data = {
+      '/': { dir: true },
+      '/xash': { dir: true },
+      '/xash/valve': { dir: true },
+      '/xash/valve/maps': { dir: true },
+      '/xash/valve/maps/e1m1.bsp': { size: 120 },
+      '/xash/valve/liblist.gam': { size: 40 },
+      '/xash/valve/models': { dir: true },
+      '/xash/valve/models/player.mdl': { size: 30 },
+    };
+    const mock = {
+      readdir: (p) => Object.keys(data)
+        .filter((k) => k !== p && data[k] && k.slice(0, k.lastIndexOf('/')) === (p === '/' ? '' : p))
+        .map((k) => k.split('/').pop()),
+      isDir: (p) => !!(data[p] && data[p].dir),
+      isFile: (p) => !!(data[p] && !data[p].dir),
+      stat: (p) => ({ size: data[p].size, mtime: 0 }),
+    };
+    const walked = Engine.fsWalkFiles(mock, '/xash');
+    ok('walk(real-FS): найдено 3 файла рекурсивно', walked.length === 3, `${walked.length}`);
+    const names = Engine.collectResourceNames(mock, '/xash', 320).map((n) => n.name);
+    ok('walk(real-FS): имена без папок, bsp первым',
+      names.length === 3 && names[0] === 'e1m1.bsp' && !names.includes(''), names.join(','));
+    ok('walk(real-FS): fsCountFiles', Engine.fsCountFiles(mock, '/xash') === 3);
+  }
+
+  /* ── 20. ЖЁСТКИЙ LINUX-ФИКС инпутов (по исходникам интерфейса) ── */
+  {
+    const srcApp = require('fs').readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+    const srcHtml = require('fs').readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    ok('linux-fix: атрибут webkitdirectory полностью удалён из кода',
+      !/webkitdirectory['"]\s*,\s*['"]/.test(srcApp) && !/webkitdirectory\s*=/.test(srcApp)
+      && !/webkitdirectory/i.test(srcHtml));
+    ok('linux-fix: атрибут directory тоже не выставляется',
+      !/setAttribute\(\s*['"]directory/.test(srcApp) && !/\bdirectory\s*=/.test(srcHtml));
+    ok('linux-fix: инпуты строго одиночный .zip (game-zip-input)',
+      /classList|className/.test(srcApp) && srcApp.includes("game-zip-input") && srcApp.includes("'.zip'"),
+      'нет класса');
+    ok('linux-fix: ветка drop берёт файлы из e.dataTransfer.files',
+      srcApp.includes('dt.files') && srcApp.includes('e.dataTransfer'));
+    ok('linux-fix: прогресс «Распаковка: X%»',
+      /Распаковка\$\{suffix\}: |Распаковка: /.test(srcApp));
+  }
+
+  /* ── 21. (опционально) смоук настоящего /xash.js ── */
+  const realGlue = path.join(__dirname, '..', '..', 'xash.js');
+  if (!process.env.SKIP_REAL_ENGINE && require('fs').existsSync(realGlue)) {
+    try {
+      const { spawnSync } = require('child_process');
+      const r = spawnSync(process.execPath,
+        ['--stack-size=8192', path.join(__dirname, 'smoke-real-engine.js')],
+        { encoding: 'utf8', timeout: 150000 });
+      const tail = ((r.stdout || '') + (r.stderr || '')).split('\n').filter((l) => l.trim());
+      ok('real-glue: smoke реального оригинального /xash.js [runtime+Module.FS]',
+        r.status === 0, tail.slice(-5).join(' | '));
+      ok('real-glue: createDataFile байты round-trip в настоящей MEMFS',
+        /readFile bytes \[1,2,3,250\]/.test(r.stdout || ''), tail.slice(-8).join(' | '));
+    } catch (e) {
+      ok('real-glue: smoke', false, e.message);
+    }
+  } else {
+    results.push('  [SKIP] real-glue: оригинальный /xash.js не найден (или SKIP_REAL_ENGINE=1)');
+  }
 
   console.log(results.join('\n'));
   console.log('═'.repeat(56));
