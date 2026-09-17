@@ -1,0 +1,15 @@
+{
+  "name": "hashonline",
+  "private": true,
+  "version": "1.4.0",
+  "description": "Hash Online · веб-портал движка Ха-кэш — автономный браузерный клиент",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node dev-server.js",
+    "start": "echo 'static site - no server needed' && exit 0",
+    "test": "node tests/run-tests.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
