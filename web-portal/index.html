@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#05070d" />
+  <title>Hash Online — загрузите файлы игры и играйте</title>
+  <meta name="description" content="Hash Online — браузерный игровой портал на движке «Ха-кэш» (модифицированный Xash3D / GoldSrc). Сборка под Chrome ARM64 и Raspberry Pi 5." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2305070d'/%3E%3Cpath d='M12 6v20M20 6v20M7 12h18M7 20h18' stroke='%2300ffc8' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Russo+One&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <noscript><div class="noscript">Hash Online требует включённый JavaScript.</div></noscript>
+
+  <!-- ═══ Фоновые слои (сетка / свечение / скан-линии / виньетка) ═══ -->
+  <div class="bg" aria-hidden="true">
+    <div class="bg__grid"></div>
+    <div class="bg__orb bg__orb--a"></div>
+    <div class="bg__orb bg__orb--b"></div>
+    <div class="bg__orb bg__orb--c"></div>
+    <div class="bg__scan"></div>
+    <div class="bg__vignette"></div>
+  </div>
+
+  <!-- ═══════════════ ЭКРАН 1 · ЗАСТАВКА ═══════════════ -->
+  <section id="screen-splash" class="screen screen--splash is-active" aria-label="Заставка">
+    <div class="splash">
+      <div class="splash__eyebrow">XASH3D // GOLDSRC · BROWSER&nbsp;EDITION</div>
+
+      <h1 class="logo" aria-label="Hash Online">
+        <span class="logo__a">HASH</span>
+        <span class="logo__b">ONLINE</span>
+      </h1>
+
+      <p class="splash__tagline">Загрузите файлы игры и играйте</p>
+
+      <button id="btn-start" class="btn btn--bracket btn--xl">НАЧАТЬ</button>
+
+      <div class="splash__meta">
+        <span>движок «Ха-кэш»</span><i></i>
+        <span>Chrome ARM64</span><i></i>
+        <span>Raspberry&nbsp;Pi&nbsp;5 ready</span>
+      </div>
+
+      <div class="splash__kbd">нажмите <kbd>Enter</kbd> для продолжения</div>
+    </div>
+    <div class="screen-version">hash-online · portal v1.0.0 · arm64</div>
+  </section>
+
+  <!-- ═══════════════ ЭКРАН 2 · ГЛАВНОЕ МЕНЮ ═══════════════ -->
+  <section id="screen-menu" class="screen screen--menu" aria-label="Главное меню" aria-hidden="true">
+    <div class="menu">
+      <header class="menu__head">
+        <div class="menu__logo">HASH<span>·ONLINE</span></div>
+        <div class="menu__actions">
+          <button id="btn-sound" class="icon-btn" aria-pressed="true" title="Звук интерфейса" aria-label="Переключить звук интерфейса"></button>
+          <button id="btn-exit" class="btn btn--bracket btn--s">ВЫХОД</button>
+        </div>
+      </header>
+
+      <div class="menu__title">
+        <h2>Выберите игровую платформу</h2>
+        <p>Оригинальные ресурсы GoldSrc монтируются в виртуальную файловую систему движка «Ха-кэш»</p>
+      </div>
+
+      <!-- Основная плитка: CS 1.6, Half-Life и кнопка [ ЕЩЁ ] -->
+      <div id="games-grid" class="games-grid"></div>
+
+      <!-- Плавно раскрывающийся блок расширенных сборок -->
+      <div id="extra-wrap" class="extra-wrap">
+        <div class="extra-inner">
+          <div class="extra-content">
+            <div class="extra-label"><span>Расширенные сборки</span></div>
+            <div id="extra-grid" class="games-grid games-grid--extra"></div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="menu__foot">
+        <span id="menu-status" class="menu-status"><i class="dot"></i><span class="menu-status__text">библиотека пуста — загрузите файлы игры</span></span>
+        <span class="menu__build">xa-cache // fx-mod · webgl2 · wasm</span>
+      </footer>
+    </div>
+  </section>
+
+  <!-- Сюда скрипт монтирует модальные окна -->
+  <div id="modal-root"></div>
+
+  <!-- Уведомления -->
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
