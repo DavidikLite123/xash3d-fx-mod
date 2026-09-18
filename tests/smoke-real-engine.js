@@ -1,18 +1,22 @@
 #!/usr/bin/env node
 /* ════════════════════════════════════════════════════════════════
-   HASH ONLINE · боевой смоук НАСТОЯЩЕГО движка Xash3D FWGS
+   HASH ONLINE · боевой смоук НАСТОЯЩЕГО движка Xash3D FWGS (поток CS 1.6)
 
    Загружает оригинальные файлы порта в глобальном контексте (как это
    делает <script src> в браузере) и проверяет:
-     · var Module (контракт Emscripten) собирается функцией app.buildModuleConfig
-     · /xash.html.mem применяется как Module.memoryInitializerRequest
-     · Module.preInit останавливает авто-запуск run() (main() не вызван)
+     · var Module (контракт Emscripten) собирается app.ensureModule +
+       app.buildModuleConfig — arguments=['-game','cstrike','+maxplayers','16']
+       выставляются ДО загрузки ядра
+     · «контролируемый» Module.memoryInitializerRequest держит main():
+       после загрузки ВСЕХ скриптов Module.calledRun обязан быть false
+       (детерминированный standby — в браузере это исключало авто-старт
+       с пустыми аргументами и падение ядра)
      · /server.js, /client.js, /menu.js регистрируются в Module.DLFCN
-     · Module.FS живая: mkdir + createDataFile + readFile (round-trip байтов)
-     · после resumeEngineRun() движок РЕАЛЬНО стартует: печатает баннер
-       «Xash3D FWGS … started», принимает /xash рабочей директорией и
-       читает смонтированный нами valve/liblist.gam
-
+     · /rodir/valve + /rodir/cstrike смонтированы побайтово в настоящей FS
+       (halflife.wad, gfx.wad, cstrike.wad, модели v_*.mdl, карта de_dust2.bsp)
+     · после releaseMemoryRequest() движок РЕАЛЬНО стартует один раз:
+       печатает баннер «Xash3D FWGS … started», принимает /rodir рабочей
+       директорией, строит search path cstrike + valve
    WebGL в Node нет, поэтому ядро доходит до инициализации видео и
    останавливается на контексте — это ожидаемо и не считается провалом.
    ════════════════════════════════════════════════════════════════ */
@@ -96,7 +100,8 @@ global.document = {
   createElement: (t) => (t === 'canvas' ? canvas : { style: mkStyle(), appendChild() {}, addEventListener() {} }),
   createElementNS: (ns, t) => (t === 'canvas' ? canvas : { style: mkStyle(), appendChild() {} }),
   getElementById: (id) => (id === 'canvas' ? canvas : null),
-  querySelector: () => null, querySelectorAll: () => [], getElementsByTagName: () => [],
+  querySelector: (sel) => (sel === 'canvas' ? canvas : null),
+  querySelectorAll: () => [], getElementsByTagName: () => [],
   addEventListener: () => {}, removeEventListener: () => {},
   body: { appendChild() {}, style: mkStyle() },
   documentElement: { style: mkStyle(), requestFullscreen: () => Promise.resolve() },
@@ -120,13 +125,12 @@ global.XMLHttpRequest = function FakeXHR() {
   };
 };
 
-let savedRun = null;
-let runtimeReady = false;
 let depsLeft = -1;
-let calledRunBeforeResume = false;
+let runtimeReady = false;
 
-/* ── var Module собирается той же функцией, что и в браузере ── */
-global.Module = app.buildModuleConfig({
+/* ── var Module — ровно так, как в браузере: ensureModule + buildModuleConfig ── */
+const M = app.ensureModule();
+Object.assign(M, app.buildModuleConfig({
   canvas,
   args: [],
   totalMemoryMB: 384,
@@ -136,15 +140,20 @@ global.Module = app.buildModuleConfig({
   onStatus: () => {},
   onDeps: (left) => { depsLeft = left; },
   onRuntime: () => { runtimeReady = true; },
-  onHaltRun: () => { savedRun = app.haltEngineRun(global); },
-});
-/* как в оригинальном порте: инициализатор памяти уже загружен XHR'ом */
+}));
+M.canvas = canvas;
+
+/* ТРЕБОВАНИЕ 3: аргументы CS 1.6 выставляются ДО загрузки ядра —
+   именно с ними glue запустит main() после отдачи памяти */
+const args = app.buildEngineArguments('cs16', null).concat(['-nosound']);
+M.arguments = args;
+
+/* инициализатор памяти: «контролируемый» request (status 0, без .response) —
+   glue создаст run-dependency и дождётся события "load" */
 const mem = fs.readFileSync(path.join(ROOT, 'xash.html.mem'));
-global.Module.memoryInitializerRequest = {
-  status: 200,
-  response: mem.buffer.slice(mem.byteOffset, mem.byteOffset + mem.byteLength),
-  addEventListener() {},
-};
+const memBuffer = mem.buffer.slice(mem.byteOffset, mem.byteOffset + mem.byteLength);
+const memRequest = app.createControlledMemoryRequest(memBuffer);
+M.memoryInitializerRequest = memRequest;
 
 const loadScript = (name) => {
   const t0 = Date.now();
@@ -171,30 +180,33 @@ function finish() {
   finish.done = true;
 
   const all = printLines.join('\n');
-  ok('xash.js: main() НЕ вызван до монтирования (preInit остановил run)', !calledRunBeforeResume);
-  ok('xash.js: run() сохранена для старта по кнопке', typeof savedRun === 'function');
-  ok('xash.js: Module.canvas передан в Emscripten', global.Module.canvas === canvas);
+  ok('xash.js: main() НЕ стартовал до отдачи памяти (контролируемый request держит run)',
+    !standbyCalledRun, `calledRun=${standbyCalledRun}`);
+  ok('xash.js: Module.canvas передан в Emscripten', M.canvas === canvas);
   ok('xash.js: Module.FS — настоящая ФС Emscripten',
-    !!global.Module.FS && typeof global.Module.FS.createDataFile === 'function');
-  ok('xash.js: инициализатор памяти применён (run-dependencies = 0)', depsLeft === 0, `deps=${depsLeft}`);
+    !!M.FS && typeof M.FS.createDataFile === 'function');
+  ok('xash.js: инициализатор памяти удержан (run-dependency pending)', standbyDeps > 0, `deps=${standbyDeps}`);
   ok('server.js/client.js/menu.js: библиотеки движка в DLFCN',
-    ['server', 'client', 'menu'].every((n) => global.Module.DLFCN.loadedLibNames[n]),
-    JSON.stringify(Object.keys(global.Module.DLFCN.loadedLibNames || {})));
+    ['server', 'client', 'menu'].every((n) => M.DLFCN.loadedLibNames[n]),
+    JSON.stringify(Object.keys(M.DLFCN.loadedLibNames || {})));
   ok('FS: побайтовый round-trip createDataFile → readFile', roundTripOk);
-  ok('FS: каталог /xash/valve создан через FS.mkdir', valveDirOk);
-  ok('FS: перезапись файла в настоящей MEMFS (мод поверх оригинала)', roundTripOk);
-  ok('FS: /xash/cstrike/… смонтирован побайтово (путь Counter-Strike 1.6)', csMountOk);
+  ok('FS: /rodir/valve смонтирован (halflife.wad/gfx.wad — защита от розовых артефактов)', valveDirOk);
+  ok('FS: /rodir/cstrike смонтирован (cstrike.wad, модели, de_dust2.bsp)', csMountOk);
+  ok('ENV: XASH3D_BASEDIR=/rodir · XASH3D_GAMEDIR=cstrike',
+    M.ENV && M.ENV.XASH3D_BASEDIR === '/rodir' && M.ENV.XASH3D_GAMEDIR === 'cstrike');
+  ok('движок: стартан после releaseMemoryRequest (main() исполняется)',
+    !!M.calledRun, `calledRun=${!!M.calledRun}`);
   ok('движок: баннер Xash3D FWGS напечатан (main() реально исполняется)',
     /Xash3D FWGS .*started/.test(all), all.slice(0, 160));
-  ok('движок: /xash принят рабочей директорией', /\/xash is working directory now/.test(all));
-  ok('движок: прочитан смонтированный valve/liblist.gam',
-    /valve\/liblist\.gam/.test(all), all.slice(0, 200));
+  ok('движок: /rodir принят рабочей директорией', /\/rodir is working directory now/.test(all));
+  ok('движок: kstrike/valve в search path (карты de_dust2 читаются)',
+    /cstrike/.test(all) && /valve/.test(all), all.slice(0, 260));
   ok('движок: дошёл до инициализации видео (WebGL в Node отсутствует)',
     reachedVideo || /Setting video mode|bpp|GL|shader/i.test(all + errLines.join('\n')));
 
   console.log('─'.repeat(56));
   console.log('вывод ядра (первые строки):');
-  console.log(printLines.slice(0, 14).map((l) => '  | ' + l).join('\n') || '  | (пусто)');
+  console.log(printLines.slice(0, 16).map((l) => '  | ' + l).join('\n') || '  | (пусто)');
   if (errLines.length) {
     console.log('ошибки/предупреждения (первые строки):');
     console.log(errLines.slice(0, 6).map((l) => '  ! ' + l).join('\n'));
@@ -206,6 +218,8 @@ function finish() {
 }
 
 /* ── загрузка цепочки ядра ── */
+let standbyCalledRun = false;
+let standbyDeps = 0;
 let roundTripOk = false;
 let valveDirOk = false;
 let csMountOk = false;
@@ -221,52 +235,59 @@ try {
   process.exit(2);
 }
 
-/* до старта main(): авто-запуск ядра обязан быть перехвачен в Module.preInit */
-calledRunBeforeResume = !!global.Module.calledRun;
-say(`  после загрузки скриптов: Module.calledRun = ${calledRunBeforeResume} (main ещё не вызван)`);
+/* после загрузки ВСЕХ скриптов ядро обязано быть в standby:
+   память удержана — main() ещё не вызывался (детерминированный контракт) */
+standbyCalledRun = !!M.calledRun;
+standbyDeps = depsLeft;
+say(`  после загрузки скриптов: Module.calledRun = ${standbyCalledRun} (main ещё не вызван), depsLeft = ${standbyDeps}`);
 
-/* ── монтирование игровых файлов в настоящую Module.FS ── */
-const FS = global.Module.FS;
+/* ── монтирование игровых файлов: /rodir/valve + /rodir/cstrike ── */
+const FS = M.FS;
 try {
-  const dir = app.setupEngineFS(FS, 'valve');
-  valveDirOk = !!dir && FS.readdir('/xash/valve').length >= 0 && FS.cwd() === app.ENGINE_ROOT;
-  app.mountFileToFS(FS, '/xash/valve/liblist.gam',
+  const dir = app.setupEngineFS(FS, 'cstrike');
+  ok('FS: setupEngineFS создал /rodir, /rodir/valve, /rodir/cstrike (cwd=/rodir)',
+    !!dir && dir === '/rodir/cstrike' && FS.cwd() === app.ENGINE_ROOT);
+
+  /* базовые ассеты — без них розовые артефакты */
+  app.mountFileToFS(FS, '/rodir/valve/liblist.gam',
     'game "Half-Life"\nstartmap "hldemo1"\ngamedll "dlls/hl.so"\ntype "singleplayer_only"\n', true, true, false);
-  app.mountFileToFS(FS, '/xash/valve/models/player.mdl', new Uint8Array([73, 68, 83, 84, 250, 0, 66]), true, true, true);
-  const back = FS.readFile('/xash/valve/models/player.mdl');
-  roundTripOk = back.length === 7 && back[0] === 73 && back[4] === 250 && back[6] === 66;
+  app.mountFileToFS(FS, '/rodir/valve/halflife.wad', new Uint8Array(64).fill(1), true, true, true);
+  app.mountFileToFS(FS, '/rodir/valve/gfx.wad', new Uint8Array(32).fill(2), true, true, true);
+  valveDirOk = ['halflife.wad', 'gfx.wad', 'liblist.gam'].every(
+    (n) => FS.readdir('/rodir/valve').indexOf(n) >= 0);
+
+  /* CS 1.6: wad, модели оружия (v_/p_/w_), карта */
+  app.mountFileToFS(FS, '/rodir/cstrike/liblist.gam',
+    'game "Counter-Strike"\ngamedir "cstrike"\ngamedll "dlls/cstrike.so"\ntype "multiplayer_only"\n', true, true, false);
+  app.mountFileToFS(FS, '/rodir/cstrike/cstrike.wad', new Uint8Array(128).fill(3), true, true, true);
+  app.mountFileToFS(FS, '/rodir/cstrike/models/v_glock.mdl', new Uint8Array([1, 2, 3]), true, true, true);
+  app.mountFileToFS(FS, '/rodir/cstrike/models/p_glock.mdl', new Uint8Array([4, 5, 6]), true, true, true);
+  app.mountFileToFS(FS, '/rodir/cstrike/models/w_glock.mdl', new Uint8Array([7, 8, 9]), true, true, true);
+  app.mountFileToFS(FS, '/rodir/cstrike/maps/de_dust2.bsp', new Uint8Array([9, 8, 7]), true, true, true);
+
+  const vBack = FS.readFile('/rodir/cstrike/models/v_glock.mdl');
+  const bspBack = FS.readFile('/rodir/cstrike/maps/de_dust2.bsp');
+  roundTripOk = vBack.length === 3 && vBack[0] === 1 && bspBack.length === 3 && bspBack[2] === 7;
 
   /* перезапись того же пути (мод поверх оригинала) в настоящей MEMFS */
-  app.mountFileToFS(FS, '/xash/valve/models/player.mdl', new Uint8Array([9, 8, 7]), true, true, true);
-  const back2 = FS.readFile('/xash/valve/models/player.mdl');
-  roundTripOk = roundTripOk && back2.length === 3 && back2[0] === 9;
+  app.mountFileToFS(FS, '/rodir/cstrike/models/v_glock.mdl', new Uint8Array([5, 5]), true, true, true);
+  const vBack2 = FS.readFile('/rodir/cstrike/models/v_glock.mdl');
+  roundTripOk = roundTripOk && vBack2.length === 2 && vBack2[0] === 5;
 
-  /* каталог CS 1.6: /xash/cstrike/… — то, что требует движок */
-  app.setupEngineFS(FS, 'cstrike');
-  app.mountFileToFS(FS, '/xash/cstrike/models/player/urban/urban.mdl', new Uint8Array([1, 2, 3]), true, true, true);
-  const csList = FS.readdir('/xash/cstrike/models/player/urban');
-  const csBytes = FS.readFile('/xash/cstrike/models/player/urban/urban.mdl');
-  csMountOk = csList.indexOf('urban.mdl') >= 0 && csBytes.length === 3 && csBytes[2] === 3;
-  say(`  FS: /xash/cstrike/models/player/urban = ${JSON.stringify(csList)} · байты = ${JSON.stringify(Array.from(csBytes))}`);
-
-  say(`  FS.cwd() = ${FS.cwd()} · /xash/valve: ${FS.readdir('/xash/valve').join(', ')}`);
+  csMountOk = ['cstrike.wad', 'liblist.gam', 'maps', 'models'].every(
+    (n) => FS.readdir('/rodir/cstrike').indexOf(n) >= 0);
+  say(`  FS: /rodir/cstrike = ${JSON.stringify(FS.readdir('/rodir/cstrike'))} · /rodir/valve = ${JSON.stringify(FS.readdir('/rodir/valve'))}`);
 } catch (e) {
   console.error('СБОЙ МОНТИРОВАНИЯ В FS:', e && (e.message || e));
 }
 
+/* ── переменные окружения движка (после xash.js — glue владеет ENV) ── */
+app.applyEngineEnv(M, { baseDir: app.ENGINE_ROOT, gameDir: 'cstrike' });
+
 /* ── старт main(): ровно то, что делает кнопка [ ЗАПУСТИТЬ ] ── */
-global.Module.ENV.XASH3D_BASEDIR = app.ENGINE_ROOT;
-global.Module.ENV.XASH3D_GAMEDIR = 'valve';
-const args = app.buildEngineArguments('hl1', null, { width: 800, height: 480 }).concat(['-nosound']);
-say(`  Module['arguments'] = ${JSON.stringify(args)}`);
-try {
-  app.resumeEngineRun(global, savedRun, args);
-  say('  resumeEngineRun(): main() вызван');
-} catch (e) {
-  const msg = String((e && (e.message || e)) || '');
-  if (/SimulateInfiniteLoop/.test(msg)) say('  main() ушёл в бесконечный цикл движка (штатно)');
-  else say('  исключение при старте main(): ' + msg.slice(0, 200));
-}
+say(`  Module['arguments'] = ${JSON.stringify(M.arguments)}`);
+const released = app.releaseMemoryRequest(memRequest);
+say(`  releaseMemoryRequest() = ${released} → glue применяет xash.html.mem, main() стартует один раз`);
 
 /* ждём вывода ядра: видео-инициализация в Node обрывается на WebGL-стабе */
 setTimeout(() => {
