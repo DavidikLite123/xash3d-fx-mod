@@ -1,0 +1,339 @@
+/* ════════════════════════════════════════════════════════════════
+   HASH ONLINE · ЧИТ-МЕНЮ ИГРОКА — стили модального окна.
+   Полностью автономно (префикс .xcheat*), но рисует в палитре портала:
+   использует CSS-переменные из style.css (:root), с фолбэками.
+   ════════════════════════════════════════════════════════════════ */
+
+.xcheat {
+  --xc-mint:  var(--mint,  #00ffc8);
+  --xc-cyan:  var(--cyan,  #35c9ff);
+  --xc-pink:  var(--pink,  #ff3d71);
+  --xc-amber: var(--amber, #ffb454);
+  --xc-text:  var(--text,  #e2eaf6);
+  --xc-dim:   var(--dim,   #8a97b2);
+  --xc-faint: var(--faint, #55617c);
+  --xc-line:  var(--line,  rgba(148, 170, 220, .14));
+  --xc-line2: var(--line-2,rgba(148, 170, 220, .26));
+  --xc-panel: var(--panel, #0b1120);
+
+  position: fixed;
+  inset: 0;
+  z-index: 9000;                       /* поверх HUD и консоли движка */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono, ui-monospace, Menlo, Consolas, monospace);
+  color: var(--xc-text);
+}
+
+.xcheat[hidden] { display: none; }
+
+/* ── подложка ── */
+.xcheat__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 4, 10, .72);
+  backdrop-filter: blur(6px) saturate(.8);
+  -webkit-backdrop-filter: blur(6px) saturate(.8);
+  opacity: 0;
+  transition: opacity .16s ease-out;
+}
+.xcheat--open .xcheat__backdrop { opacity: 1; }
+
+/* ── панель ── */
+.xcheat__panel {
+  position: relative;
+  z-index: 1;
+  width: min(680px, calc(100vw - 24px));
+  max-height: min(82vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(180deg, rgba(0, 255, 200, .05), transparent 120px),
+    var(--xc-panel);
+  border: 1px solid var(--xc-line2);
+  border-radius: var(--radius, 14px);
+  box-shadow:
+    0 24px 70px -18px rgba(0, 0, 0, .85),
+    0 0 42px -14px var(--xc-mint);
+  opacity: 0;
+  transform: translateY(10px) scale(.985);
+  transition: opacity .16s ease-out, transform .18s var(--ease-back, cubic-bezier(.2, 1.1, .3, 1.12));
+  overflow: hidden;
+}
+.xcheat--open .xcheat__panel { opacity: 1; transform: none; }
+
+/* «скобочные» уголки — фирменный приём портала */
+.xcheat__panel::before,
+.xcheat__panel::after {
+  content: "";
+  position: absolute;
+  width: 18px; height: 18px;
+  border: 2px solid var(--xc-mint);
+  pointer-events: none;
+}
+.xcheat__panel::before { top: 8px; left: 8px;  border-right: none; border-bottom: none; }
+.xcheat__panel::after  { bottom: 8px; right: 8px; border-left: none;  border-top: none; }
+
+/* ── шапка ── */
+.xcheat__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--xc-line);
+}
+.xcheat__title {
+  font-weight: 700;
+  letter-spacing: .14em;
+  color: #fff;
+  text-shadow: 0 0 14px rgba(0, 255, 200, .45);
+}
+.xcheat__title::before { content: "[ "; color: var(--xc-mint); }
+.xcheat__title::after  { content: " ]"; color: var(--xc-mint); }
+
+.xcheat__close {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--xc-line2);
+  border-radius: 8px;
+  color: var(--xc-dim);
+  width: 30px; height: 30px;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  transition: color .12s, border-color .12s, box-shadow .12s;
+}
+.xcheat__close:hover { color: #fff; border-color: var(--xc-pink); box-shadow: 0 0 14px -6px var(--xc-pink); }
+
+/* ── тело ── */
+.xcheat__body {
+  padding: 12px 18px 8px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--xc-line2) transparent;
+}
+.xcheat__body::-webkit-scrollbar { width: 8px; }
+.xcheat__body::-webkit-scrollbar-thumb { background: var(--xc-line2); border-radius: 4px; }
+
+.xcheat__section { margin-bottom: 16px; }
+.xcheat__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  letter-spacing: .18em;
+  color: var(--xc-faint);
+}
+.xcheat__section-head > span::before { content: "▸ "; color: var(--xc-cyan); }
+
+.xcheat__mode {
+  appearance: none;
+  background: rgba(10, 14, 26, .9);
+  border: 1px solid var(--xc-line2);
+  border-radius: 7px;
+  color: var(--xc-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 22px 4px 8px;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--xc-mint) 50%),
+                    linear-gradient(135deg, var(--xc-mint) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 55%, calc(100% - 8px) 55%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+.xcheat__mode:hover, .xcheat__mode:focus { border-color: var(--xc-mint); color: var(--xc-text); outline: none; }
+
+.xcheat__filter {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  background: rgba(6, 9, 18, .85);
+  border: 1px solid var(--xc-line);
+  border-radius: 8px;
+  color: var(--xc-text);
+  font: inherit;
+  font-size: 13px;
+}
+.xcheat__filter:focus { outline: none; border-color: var(--xc-mint); box-shadow: 0 0 16px -8px var(--xc-mint); }
+.xcheat__filter::placeholder { color: var(--xc-faint); }
+
+/* ── сетка карт ── */
+.xcheat__maps {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--xc-line2) transparent;
+}
+.xcheat__map {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 7px 9px;
+  background: rgba(12, 18, 34, .6);
+  border: 1px solid var(--xc-line);
+  border-radius: 8px;
+  color: var(--xc-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .12s, background .12s, transform .12s, box-shadow .12s;
+}
+.xcheat__map:hover, .xcheat__map:focus-visible {
+  border-color: var(--xc-mint);
+  background: rgba(0, 255, 200, .08);
+  box-shadow: 0 0 16px -8px var(--xc-mint);
+  transform: translateY(-1px);
+  outline: none;
+}
+.xcheat__map:active { transform: translateY(0); }
+.xcheat__map-title { font-size: 12px; font-weight: 700; color: #fff; }
+.xcheat__map-name  { font-size: 10px; color: var(--xc-faint); }
+
+/* ── тумблер sv_cheats ── */
+.xcheat-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 8px;
+}
+.xcheat-switch input { position: absolute; opacity: 0; pointer-events: none; }
+.xcheat-switch__track {
+  width: 38px; height: 20px;
+  border-radius: 999px;
+  border: 1px solid var(--xc-line2);
+  background: rgba(6, 9, 18, .9);
+  position: relative;
+  transition: background .14s, border-color .14s, box-shadow .14s;
+  flex: none;
+}
+.xcheat-switch__thumb {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--xc-faint);
+  transition: left .14s var(--ease-out, ease-out), background .14s;
+}
+.xcheat-switch input:checked + .xcheat-switch__track {
+  background: rgba(0, 255, 200, .16);
+  border-color: var(--xc-mint);
+  box-shadow: 0 0 14px -6px var(--xc-mint);
+}
+.xcheat-switch input:checked + .xcheat-switch__track .xcheat-switch__thumb {
+  left: 20px; background: var(--xc-mint);
+}
+.xcheat-switch input:focus-visible + .xcheat-switch__track { outline: 2px solid var(--xc-cyan); outline-offset: 2px; }
+.xcheat-switch__label { font-size: 12px; color: var(--xc-dim); }
+.xcheat-switch__label em { font-style: normal; color: var(--xc-mint); font-weight: 700; }
+
+/* ── переключатели god / noclip ── */
+.xcheat__toggles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.xcheat__toggle {
+  appearance: none;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  background: rgba(12, 18, 34, .6);
+  border: 1px solid var(--xc-line);
+  border-radius: 8px;
+  color: var(--xc-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .12s, background .12s, box-shadow .12s;
+}
+.xcheat__toggle:hover { border-color: var(--xc-cyan); }
+.xcheat__toggle-led {
+  grid-row: 1 / 3;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--xc-faint);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .04);
+  transition: background .12s, box-shadow .12s;
+}
+.xcheat__toggle.is-on { border-color: var(--xc-mint); background: rgba(0, 255, 200, .08); }
+.xcheat__toggle.is-on .xcheat__toggle-led { background: var(--xc-mint); box-shadow: 0 0 10px 1px var(--xc-mint); }
+.xcheat__toggle-title { font-size: 12px; font-weight: 700; letter-spacing: .06em; }
+.xcheat__toggle-hint  { font-size: 10px; color: var(--xc-faint); }
+
+/* ── кнопки действий ── */
+.xcheat__actions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.xcheat__action {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px;
+  min-height: 56px;
+  justify-content: center;
+  background: linear-gradient(180deg, rgba(53, 201, 255, .07), rgba(12, 18, 34, .6));
+  border: 1px solid var(--xc-line);
+  border-radius: 9px;
+  color: var(--xc-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .12s, box-shadow .12s, transform .12s;
+}
+.xcheat__action:hover, .xcheat__action:focus-visible {
+  border-color: var(--xc-cyan);
+  box-shadow: 0 0 18px -8px var(--xc-cyan);
+  transform: translateY(-1px);
+  outline: none;
+}
+.xcheat__action:active { transform: translateY(0); }
+.xcheat__action-title { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: #fff; }
+.xcheat__action-hint  { font-size: 10px; color: var(--xc-faint); line-height: 1.35; }
+
+/* ── футер / статус ── */
+.xcheat__foot {
+  border-top: 1px solid var(--xc-line);
+  padding: 8px 18px 12px;
+}
+.xcheat__status {
+  font-size: 11px;
+  color: var(--xc-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+.xcheat__status::before { content: "» "; color: var(--xc-mint); }
+.xcheat__status--err { color: var(--xc-pink); }
+.xcheat__status--err::before { color: var(--xc-pink); }
+
+/* ── адаптив ── */
+@media (max-width: 560px) {
+  .xcheat__toggles, .xcheat__actions { grid-template-columns: 1fr; }
+  .xcheat__panel { max-height: 88vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .xcheat__backdrop, .xcheat__panel,
+  .xcheat-switch__track, .xcheat-switch__thumb { transition: none; }
+}

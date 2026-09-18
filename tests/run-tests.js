@@ -582,6 +582,105 @@ function mockFS() {
     ok('dev-server: COOP/COEP и MIME для .mem/.wasm', /Cross-Origin-Embedder-Policy/.test(dev) && /\.mem/.test(dev));
   }
 
+  /* ═══════════════ 10.5. ЧИТ-МЕНЮ ИГРОКА (cheat-menu.js) ═══════════════ */
+  {
+    const cheat = require(path.join(ROOT, 'cheat-menu.js'));
+    const cfg = cheat.CHEAT_CONFIG;
+
+    /* интеграция в страницу */
+    const srcHtml = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+    ok('cheat: css и модуль подключены в index.html',
+      /href="cheat-menu\.css"/.test(srcHtml) && /<script type="module" src="\/cheat-menu\.js"><\/script>/.test(srcHtml));
+
+    /* конфиг: карты уникальны и допустимы, команды/тумблеры валидны */
+    const mapNames = cfg.maps.map((m) => m.name);
+    ok('cheat: конфиг карт не пуст, имена уникальны и безопасны',
+      mapNames.length >= 5 && new Set(mapNames).size === mapNames.length
+      && mapNames.every((n) => cheat.sanitizeToken(n) === n));
+    ok('cheat: god/noclip тумблеры с уникальными id',
+      new Set(cfg.toggles.map((t) => t.id)).size === cfg.toggles.length
+      && cfg.toggles.every((t) => typeof t.command === 'string' && t.command.length > 0));
+    ok('cheat: кнопки действий содержат непустые команды (impulse 101 в арсенале)',
+      cfg.actions.every((a) => Array.isArray(a.commands) && a.commands.length > 0)
+      && cfg.actions.find((a) => a.id === 'arsenal').commands.includes('impulse 101'));
+
+    /* безопасность команд: никакого инжекта переводом строки / токена */
+    ok('cheat: sanitizeToken режет инжекты («de_dust2; quit», кавычки, пусто)',
+      cheat.sanitizeToken('de_dust2; quit') === ''
+      && cheat.sanitizeToken('a"b') === '' && cheat.sanitizeToken('') === ''
+      && cheat.sanitizeToken('de_dust2') === 'de_dust2');
+    ok('cheat: normalizeCommand схлопывает переносы строк (одна строка = одна команда)',
+      cheat.normalizeCommand('  god\nquit\r') === 'god quit'
+      && cheat.normalizeCommand('a\x07b') === 'a b');
+    let threw = false;
+    try { cheat.buildMapCommand('changelevel', 'de_dust2; kill'); } catch (e) { threw = true; }
+    ok('cheat: buildMapCommand бросает на недопустимой карте', threw);
+    ok('cheat: buildMapCommand формирует changelevel/map',
+      cheat.buildMapCommand('changelevel', 'de_dust2') === 'changelevel de_dust2'
+      && cheat.buildMapCommand('map', 'cs_office') === 'map cs_office');
+
+    /* состояние и планы */
+    const st = cheat.createCheatsState(cfg);
+    ok('cheat: стартовое состояние — sv_cheats 0, все тумблеры выкл',
+      st.svCheats === false && Object.values(st.toggles).every((v) => v === false)
+      && st.mapMode === cfg.mapMode);
+    const arsenal = cfg.actions.find((a) => a.id === 'arsenal');
+    ok('cheat: чит-действие при sv_cheats 0 сначала шлёт «sv_cheats 1»',
+      cheat.planActionCommands(cfg, st, arsenal)[0] === cfg.cheats.cvar + ' 1');
+    st.svCheats = true;
+    ok('cheat: при sv_cheats 1 лишний «sv_cheats 1» не шлётся',
+      cheat.planActionCommands(cfg, st, arsenal)[0] === arsenal.commands[0]);
+    st.svCheats = false;
+    st.toggles.god = true;
+    const move = cheat.planMapChange(cfg, st, 'de_nuke');
+    ok('cheat: смена карты сбрасывает god/noclip и строит changelevel',
+      move.cmd === 'changelevel de_nuke' && move.state.toggles.god === false);
+    ok('cheat: режим карты переопределяется («map»)',
+      cheat.planMapChange(cfg, st, 'de_nuke', 'map').cmd === 'map de_nuke');
+
+    /* выбор канала и отправка */
+    ok('cheat: приоритет каналов — cbuf → ccall → exec → null',
+      cheat.pickCommandChannel({ _Cbuf_InsertText(){}, _malloc(){}, writeAsciiToMemory(){}, ccall(){} }) === 'cbuf'
+      && cheat.pickCommandChannel({ ccall(){} }) === 'ccall'
+      && cheat.pickCommandChannel({ _Cmd_ExecuteString(){}, _malloc(){}, writeAsciiToMemory(){} }) === 'exec'
+      && cheat.pickCommandChannel({}) === null);
+    const rec = { mallocs: [], frees: [], writes: [] };
+    const fakeM = {
+      _malloc(n) { rec.mallocs.push(n); return 4096; },
+      _free(p) { rec.frees.push(p); },
+      writeAsciiToMemory(s) { rec.writes.push(String(s)); },
+      _Cbuf_InsertText() {},
+    };
+    const r1 = cheat.execWithModule(fakeM, 'changelevel de_dust2');
+    ok('cheat: execWithModule — Cbuf получает строку с завершающим \\n, память освобождается',
+      r1.ok === true && r1.channel === 'cbuf'
+      && rec.writes.length === 1 && rec.writes[0] === 'changelevel de_dust2\n'
+      && rec.mallocs.length === 1 && rec.frees.length === 1);
+    ok('cheat: execWithModule без движка — честная ошибка, без исключений',
+      cheat.execWithModule(null, 'god').ok === false
+      && cheat.execWithModule(fakeM, '\n\r ').ok === false);
+    const broken = { ...fakeM, _Cbuf_InsertText() { throw new Error('abort'); } };
+    ok('cheat: исключение движка внутри exec поймано (сессия не ломается)',
+      cheat.execWithModule(broken, 'god').ok === false && cheat.execWithModule(broken, 'god').error === 'abort');
+
+    /* слияние карт из конфига и FS */
+    const merged = cheat.mergeMapList(cfg.maps, ['de_dust2.bsp', 'fy_pool_day', 'aim_map.bsp']);
+    ok('cheat: mergeMapList — конфиг ∪ FS без дублей, порядок конфига сохранён',
+      merged[0].name === 'de_dust2' && merged.filter((m) => m.name === 'de_dust2').length === 1
+      && merged.some((m) => m.name === 'fy_pool_day') && merged.some((m) => m.name === 'aim_map'));
+
+    /* контракт ядра: мост опирается на экспортируемый Cbuf_InsertText */
+    const srcXash = fs.readFileSync(path.join(ROOT, 'xash.js'), 'utf8');
+    ok('cheat: ядро экспортирует мост команд (Module["_Cbuf_InsertText"])',
+      srcXash.includes('Module["_Cbuf_InsertText"]') && srcXash.includes('Module["ccall"]'));
+
+    /* исходник меню: страж ввода живёт только пока меню открыто, ESC — закрытие */
+    const srcMenu = fs.readFileSync(path.join(ROOT, 'cheat-menu.js'), 'utf8');
+    ok('cheat: ESC закрывает меню (capture-страж), Pointer Lock отпускается при открытии',
+      /e\.key === 'Escape'/.test(srcMenu) && /exitPointerLock/.test(srcMenu)
+      && /removeEventListener/.test(srcMenu));
+  }
+
   /* ═══════════════ 11. БОЕВОЙ СМОК НАСТОЯЩЕГО /xash.js ═══════════════ */
   if (!process.env.SKIP_REAL_ENGINE) {
     try {

@@ -29,6 +29,7 @@ const vm = require('vm');
 /* app.js подключается ДО создания DOM-стаба: его браузерная часть
    не должна выполняться в Node (там проверяются только чистые функции) */
 const app = require(path.join(__dirname, '..', 'app.js'));
+const cheat = require(path.join(__dirname, '..', 'cheat-menu.js'));
 
 const ROOT = path.join(__dirname, '..');
 const REQUIRED = ['xash.js', 'xash.html.mem', 'server.js', 'client.js', 'menu.js'];
@@ -203,6 +204,19 @@ function finish() {
     /cstrike/.test(all) && /valve/.test(all), all.slice(0, 260));
   ok('движок: дошёл до инициализации видео (WebGL в Node отсутствует)',
     reachedVideo || /Setting video mode|bpp|GL|shader/i.test(all + errLines.join('\n')));
+
+  /* ── мост чит-меню: execWithModule → Cbuf настоящего ядра → команда
+        исполнена движком. В Node нет живого Host-кадра, поэтому буфер
+        дреним сами через экспортированный _Cbuf_Execute (в браузере ядро
+        делает это каждый кадр автоматически). ── */
+  let bridgeNote = '';
+  try {
+    const r = cheat.execWithModule(M, 'echo XCHEAT_BRIDGE_OK');
+    bridgeNote = r.ok ? ('канал=' + r.channel) : ('ERR: ' + r.error);
+    if (r.ok && typeof M._Cbuf_Execute === 'function') M._Cbuf_Execute();
+  } catch (e) { bridgeNote = 'EXC: ' + ((e && e.message) || e); }
+  ok('cheat-menu: консольная команда исполнена настоящим ядром (Cbuf_InsertText → echo)',
+    printLines.join('\n').includes('XCHEAT_BRIDGE_OK'), bridgeNote);
 
   console.log('─'.repeat(56));
   console.log('вывод ядра (первые строки):');
