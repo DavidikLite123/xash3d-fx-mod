@@ -8,6 +8,8 @@
   <meta name="description" content="Hash Online — браузерный портал на настоящем движке Xash3D FWGS (Emscripten/asm.js). Загрузите мобильный кэш игры и играйте прямо в браузере." />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2305070d'/%3E%3Cpath d='M12 6v20M20 6v20M7 12h18M7 20h18' stroke='%2300ffc8' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="style.css" />
+  <!-- ЧИТ-МЕНЮ игрока (Level Select + быстрые читы): стили модального окна -->
+  <link rel="stylesheet" href="cheat-menu.css" />
 </head>
 <body>
   <noscript><div class="noscript">Hash Online требует включённый JavaScript.</div></noscript>
@@ -136,5 +138,8 @@
        подключает app.js динамически — сначала настраивается глобальный
        `var Module = { … }`, затем скрипты оригинального порта Xash3D -->
   <script type="module" src="/app.js"></script>
+  <!-- ЧИТ-МЕНЮ игрока: автономный модуль, вешает кнопку в HUD #screen-game
+       и шлёт консольные команды в движок через Module._Cbuf_InsertText -->
+  <script type="module" src="/cheat-menu.js"></script>
 </body>
 </html>
