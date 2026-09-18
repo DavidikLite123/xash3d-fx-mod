@@ -288,6 +288,31 @@ function mockFS() {
     ok('цепочка скриптов app.js: xash → server → client → menu',
       JSON.stringify(app.ENGINE_SCRIPTS) === JSON.stringify(['/xash.js', '/server.js', '/client.js', '/menu.js']));
     ok('инициализатор памяти в app.js: /xash.html.mem', app.ENGINE_MEMORY_INITIALIZER === '/xash.html.mem');
+
+    /* регрессия: DLFCN-проверка app.js обязана искать ровно те ключи, под
+       которыми сайд-модули регистрируются (filename="server"/"client"/"menu").
+       Баг: src.slice(2,-3) давал «erver»/«lient»/«enu» → ложное падение
+       «не зарегистрировалась в Module.DLFCN» при исправной регистрации. */
+    ok('app: имя библиотеки из src скрипта — без слэшей и .js',
+      app.libNameFromScriptSrc('/server.js') === 'server'
+      && app.libNameFromScriptSrc('client.js') === 'client'
+      && app.libNameFromScriptSrc('/public/menu.js') === 'menu');
+    {
+      const bad = app.ENGINE_SCRIPTS.filter((s) => s !== '/xash.js')
+        .map((s) => [s, app.libNameFromScriptSrc(s)])
+        .filter(([s, name]) => {
+          const body = fs.readFileSync(path.join(ROOT, name + '.js'), 'utf8');
+          return !new RegExp(`filename="${name}"`).test(body)
+            || !body.includes('DLFCN.loadedLibNames[filename]=handle');
+        });
+      ok('app: DLFCN-ключ каждого src совпадает с хвостом саморегистрации библиотеки',
+        bad.length === 0, JSON.stringify(bad));
+    }
+    {
+      const srcAppBody = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+      ok('app: регрессия — нет off-by-one slice(2,-3) в DLFCN-проверке',
+        !/slice\(2,\s*-3\)/.test(srcAppBody) && /libNameFromScriptSrc\(src\)/.test(srcAppBody));
+    }
   }
 
   /* ═══════════════ 3. ФАЛЬШИВАЯ СИМУЛЯЦИЯ ПОЛНОСТЬЮ УДАЛЕНА ═══════════════ */

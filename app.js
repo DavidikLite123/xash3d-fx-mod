@@ -68,6 +68,11 @@ const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[c]));
 
+/* Имя библиотеки для DLFCN-проверки из src скрипта:
+   '/server.js' → 'server' · 'server.js' → 'server' · '/x/client.js' → 'client'.
+   Ключ обязан совпадать с filename="…" в хвосте саморегистрации сайд-модуля. */
+const libNameFromScriptSrc = (src) => String(src).split('/').pop().replace(/\.js$/i, '');
+
 /* Консоль движка использует цветовые коды GoldSrc (^1…^7) — в DOM их снимаем */
 const stripEngineColors = (s) => String(s == null ? '' : s).replace(/\^[0-9]/g, '');
 
@@ -537,6 +542,7 @@ function buildModuleConfig(opts = {}) {
 /* ── экспорт для Node-тестов и ESM ── */
 const __testExports = {
   plural, filesLabel, fmtBytes, escapeHtml, stripEngineColors, ensureArray,
+  libNameFromScriptSrc,
   isJunkPath, pickZipTargets, makeFileSet, extractZipSet, pickDropZips,
   ENGINE_ROOT, KNOWN_GAME_DIRS, BASE_GAME_DIR, gameDirFor,
   ensureFSDirectory, resolveFSAbsolutePath, mountFileToFS, mountFileSet,
@@ -552,7 +558,7 @@ if (typeof module !== 'undefined' && typeof module.exports !== 'undefined') {
   module.exports = __testExports;
 }
 export {
-  fmtBytes, escapeHtml, stripEngineColors, ensureArray,
+  fmtBytes, escapeHtml, stripEngineColors, ensureArray, libNameFromScriptSrc,
   isJunkPath, pickZipTargets, makeFileSet, extractZipSet, pickDropZips,
   ENGINE_ROOT, KNOWN_GAME_DIRS, gameDirFor,
   ensureFSDirectory, resolveFSAbsolutePath, mountFileToFS, mountFileSet,
@@ -997,9 +1003,14 @@ export {
           assertEngineGlobals('ядро');
         } else {
           assertEngineGlobals('цепочка DSO');
-          const libName = src.slice(2, -3);   // 'server' | 'client' | 'menu'
-          if (!(M.DLFCN && M.DLFCN.loadedLibNames && M.DLFCN.loadedLibNames[libName])) {
-            throw new Error('библиотека движка ' + src + ' не зарегистрировалась в Module.DLFCN');
+          /* '/server.js' → 'server': ключ ищем ТАК ЖЕ, как хвост сайд-модуля
+             (filename="server") пишет его в Module.DLFCN.loadedLibNames */
+          const libName = libNameFromScriptSrc(src);
+          const registered = (M.DLFCN && M.DLFCN.loadedLibNames) || {};
+          if (registered[libName] == null) {
+            throw new Error('библиотека движка ' + src + ' не зарегистрировалась в Module.DLFCN'
+              + ' (ожидался ключ «' + libName + '»; зарегистрированы: '
+              + (Object.keys(registered).join(', ') || 'пусто') + ')');
           }
         }
         bootLine('скрипт подключён: ' + src);
