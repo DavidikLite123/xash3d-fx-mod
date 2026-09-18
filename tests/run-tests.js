@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 /* HASH ONLINE · юнит-тесты портала (Node.js, без зависимостей).
    Покрывают:
-     · умную распаковку .zip (app.js — чистые функции)
+     · умную распаковку .zip (app.js — чистые функции) + защиту от краша
+       "Cannot read properties of undefined (reading 'push')"
      · логику drop-ветки Drag-and-Drop (pickDropZips)
      · РЕАЛЬНЫЙ контракт запуска движка Xash3D FWGS:
-       var Module (buildModuleConfig), перехват run() (haltEngineRun /
-       resumeEngineRun), побайтовое монтирование в Module.FS,
-       аргументы Module['arguments'], websocket-прокси
+       var Module (ensureModule + buildModuleConfig), «контролируемый»
+       Module.memoryInitializerRequest (одиночный детерминированный старт),
+       авто-расчёт Module.TOTAL_MEMORY, побайтовое монтирование в Module.FS
+       (/rodir/valve + /rodir/cstrike), аргументы CS 1.6
+       ['-game','cstrike','+maxplayers','16'], ENV XASH3D_BASEDIR/GAMEDIR,
+       websocket-прокси
+     · контракт мыши: нет авто Pointer Lock, перехватчик клика, Esc/` — release
      · аудит исходников: никакой самодельной 3D-симуляции в проекте не осталось
      · боевой смоук настоящего /xash.js (tests/smoke-real-engine.js) */
 'use strict';
@@ -164,6 +169,36 @@ function mockFS() {
   ok('dnd: из смешанного дропа выбраны только .zip',
     picked.length === 3 && picked.every((f) => /\.zip$/i.test(f.name)));
 
+  /* ═══ ЗАЩИТА ОТ КРАША "reading 'push'" (требование 1) ═══ */
+  {
+    ok('push-guard: ensureArray нормализует undefined/null/объект',
+      app.ensureArray(undefined).length === 0 && app.ensureArray(null).length === 0
+      && app.ensureArray({ push() {} }).constructor === Array);
+    let threw = false;
+    try {
+      const p = app.pickZipTargets(undefined, ['valve']);
+      threw = !(Array.isArray(p.picked) && p.picked.length === 0);
+    } catch (e) { threw = true; }
+    ok('push-guard: pickZipTargets(undefined) не падает на .push', !threw);
+    threw = false;
+    try {
+      const s = app.makeFileSet(null);
+      threw = !(s.count === 0 && Array.isArray(s.items));
+    } catch (e) { threw = true; }
+    ok('push-guard: makeFileSet(null) не падает', !threw);
+    let exRes = null;
+    threw = false;
+    try { exRes = await app.extractZipSet({ files: undefined }, ['valve'], () => {}); }
+    catch (e) { threw = true; }
+    ok('push-guard: extractZipSet без zip.files не падает', !threw && exRes && exRes.set === null);
+    threw = false;
+    try {
+      const p2 = app.pickDropZips(undefined);
+      threw = !(Array.isArray(p2) && p2.length === 0);
+    } catch (e) { threw = true; }
+    ok('push-guard: pickDropZips(undefined) не падает', !threw);
+  }
+
   if (JSZIP) {
     try {
       const z = new JSZIP();
@@ -187,18 +222,32 @@ function mockFS() {
       ok('jszip: пустые директории и чужие папки вычищены',
         !tree.items.some((i) => i.path.includes('other-app')));
 
-      /* CS 1.6: из одного архива берутся и cstrike/, и базовая valve/ */
+      /* CS 1.6: из ОДНОГО архива берутся и cstrike/, и базовая valve/ —
+         без отсечения .wad и моделей оружия v_/p_/w_ (требование 3) */
       const zc = new JSZIP();
       zc.file('mob/cstrike/maps/de_dust2.bsp', 'bsp');
       zc.file('mob/cstrike/liblist.gam', 'game "Counter-Strike"');
+      zc.file('mob/cstrike/cstrike.wad', 'wad');
+      zc.file('mob/cstrike/models/v_glock.mdl', 'vmdl');
+      zc.file('mob/cstrike/models/p_usp.mdl', 'pmdl');
+      zc.file('mob/cstrike/models/w_deagle.mdl', 'wmdl');
       zc.file('mob/valve/gfx.wad', 'wad');
       zc.file('mob/valve/halflife.wad', 'wad2');
+      zc.file('mob/valve/sound/misc/void.wav', 'wav');
       const blobc = await zc.generateAsync({ type: 'uint8array' });
       const resc = await app.extractZipSet(await JSZIP.loadAsync(blobc), ['cstrike', 'valve'], () => {});
-      ok('jszip: CS-архив дал 4 файла (cstrike + valve)', resc.set.count === 4, `got ${resc.set.count}`);
+      ok('jszip: CS-архив дал 9 файлов (cstrike + valve)', resc.set.count === 9, `got ${resc.set.count}`);
+      ok('jszip: ни один .wad / .bsp / v_/p_/w_ .mdl не отсечён',
+        resc.set.items.every((i) =>
+          /\.(wad|bsp|mdl|gam|wav)$/i.test(i.path)) &&
+        resc.set.items.some((i) => /cstrike\/models\/v_glock\.mdl$/.test(i.path)) &&
+        resc.set.items.some((i) => /cstrike\/models\/p_usp\.mdl$/.test(i.path)) &&
+        resc.set.items.some((i) => /cstrike\/models\/w_deagle\.mdl$/.test(i.path)) &&
+        resc.set.items.some((i) => /cstrike\/cstrike\.wad$/.test(i.path)) &&
+        resc.set.items.some((i) => /valve\/halflife\.wad$/.test(i.path)));
       ok('jszip: каждый файл лёг в свой каталог ФС',
-        app.resolveFSAbsolutePath('cs16', 'cstrike/maps/de_dust2.bsp') === '/xash/cstrike/maps/de_dust2.bsp'
-        && app.resolveFSAbsolutePath('cs16', 'valve/gfx.wad') === '/xash/valve/gfx.wad');
+        app.resolveFSAbsolutePath('cs16', 'cstrike/maps/de_dust2.bsp') === '/rodir/cstrike/maps/de_dust2.bsp'
+        && app.resolveFSAbsolutePath('cs16', 'valve/gfx.wad') === '/rodir/valve/gfx.wad');
     } catch (e) {
       failed++;
       results.push(`  [FAIL] jszip: ${e.message}`);
@@ -254,7 +303,7 @@ function mockFS() {
     ok('анти-фейк: в app.js нет XashCore / самодельного рендера',
       !/XashCore|startRenderLoop|start2DLoop|probeGL|createEmulatedFS|collectResourceNames/.test(srcApp));
     ok('анти-фейк: в app.js нет собственного WebGL-кода',
-      !/getContext\(\s*['"](webgl|experimental-webgl|webgl2)|createShader|shaderSource|gl_Position|drawArrays|createProgram/.test(srcApp));
+      !/getContext\(\s*['"](?:webgl|experimental-webgl|webgl2)|createShader|shaderSource|gl_Position|drawArrays|createProgram/.test(srcApp));
     ok('анти-фейк: в rAF-колбэках нет никакой отрисовки (только UI и счётчик кадров движка)',
       !/requestAnimationFrame[\s\S]{0,700}(drawArrays|drawElements|clearColor|bindBuffer|fillRect|createShader|texImage2D)/.test(srcApp)
       && /счётчик кадров|mainloop движка/i.test(srcApp));
@@ -270,29 +319,25 @@ function mockFS() {
     const fakeCanvas = { id: 'canvas', nodeName: 'CANVAS' };
     const printed = [];
     const deps = [];
-    let halted = null;
     const M = app.buildModuleConfig({
       canvas: fakeCanvas,
-      args: ['-game', 'cstrike', '-dev', '3', '-takedmg'],
+      args: ['-game', 'cstrike', '+maxplayers', '16'],
       totalMemoryMB: 512,
       websocketUrl: app.websocketProxyUrl('localhost:8080'),
       onPrint: (t) => printed.push(t),
       onErr: (t) => printed.push('E:' + t),
       onDeps: (left, total) => deps.push([left, total]),
       onRuntime: () => printed.push('runtime'),
-      onHaltRun: (mod) => { halted = mod; },
     });
 
     ok('Module: canvas передан напрямую в Emscripten', M.canvas === fakeCanvas);
-    ok('Module: arguments — массив параметров клиента',
-      JSON.stringify(M.arguments) === JSON.stringify(['-game', 'cstrike', '-dev', '3', '-takedmg']));
+    ok('Module: arguments — массив параметров клиента (строгие для CS 1.6)',
+      JSON.stringify(M.arguments) === JSON.stringify(['-game', 'cstrike', '+maxplayers', '16']));
     ok('Module: TOTAL_MEMORY = 512 МБ (asm.js без роста памяти)', M.TOTAL_MEMORY === 512 * 1024 * 1024);
     ok('Module: preRun/postRun — массивы (требование glue)',
       Array.isArray(M.preRun) && Array.isArray(M.postRun));
-    ok('Module: preInit содержит остановку авто-запуска run()',
-      Array.isArray(M.preInit) && M.preInit.length === 1 && typeof M.preInit[0] === 'function');
-    M.preInit[0]();
-    ok('Module: preInit вызывает колбэк перехвата run()', halted === M);
+    ok('Module: одиночный старт — preInit-перехват авто-run не используется',
+      M.preInit === undefined);
     ok('Module: print/printErr/setStatus/monitorRunDependencies/onRuntimeInitialized на месте',
       ['print', 'printErr', 'setStatus', 'monitorRunDependencies', 'onRuntimeInitialized']
         .every((k) => typeof M[k] === 'function'));
@@ -312,55 +357,66 @@ function mockFS() {
     ok('websocketProxyUrl: нормализация хоста',
       app.websocketProxyUrl('example.com:3000/') === 'wsproxy://example.com:3000/'
       && app.websocketProxyUrl('') === '');
+
+    /* ── ensureModule: полная инициализация до любого доступа (требование 1) ── */
+    ok('ensureModule: в Node (нет window) — null, без краха', app.ensureModule() === null);
   }
 
-  /* ═══════════════ 5. ПЕРЕХВАТ И СТАРТ run() (main) ═══════════════ */
+  /* ═══════════════ 5. КОНТРОЛИРУЕМЫЙ СТАРТ: memoryInitializerRequest ═══════════════ */
   {
-    let mainCalls = 0;
-    const scope = {
-      Module: { arguments: ['-dev', '3'] },
-      run: function originalRun(args) { mainCalls++; return args; },
-    };
-    const saved = app.haltEngineRun(scope);
-    ok('halt: настоящая run() сохранена', typeof saved === 'function');
-    ok('halt: глобальная run() подменена заглушкой', scope.run() === undefined && mainCalls === 0);
-    ok('halt: Module.run тоже подменён', scope.Module.run === scope.run);
-    ok('halt: без run() возвращает null', app.haltEngineRun({}) === null);
+    /* glue xash.js: if (request.response) setTimeout(useRequest) else
+       request.addEventListener("load", useRequest) + run-dependency.
+       Пока releaseMemoryRequest() не вызван — main() физически не стартует. */
+    const buf = new ArrayBuffer(8);
+    const req = app.createControlledMemoryRequest(buf);
+    let loadCalls = 0;
+    req.addEventListener('load', () => { loadCalls++; });
+    ok('memory: контролируемый request в standby (status 0, без response)',
+      req.status === 0 && req.response === null && req._released === false);
+    ok('memory: до релиза glue не стартует (нет "load")', loadCalls === 0);
+    const okRel = app.releaseMemoryRequest(req);
+    ok('memory: релиз → status 200 + response + событие "load"',
+      okRel === true && req.status === 200 && req.response === buf && loadCalls === 1);
+    ok('memory: повторный релиз — нет двойного старта',
+      app.releaseMemoryRequest(req) === false && loadCalls === 1);
+    ok('memory: request без буфера — честно пустой', app.createControlledMemoryRequest(null).buffer === null);
 
-    const ret = app.resumeEngineRun(scope, saved, ['-game', 'cstrike', '-dev', '3', '-takedmg']);
-    ok('resume: run() возвращена и вызвана с аргументами', mainCalls === 1 && ret[0] === '-game');
-    ok('resume: Module.arguments обновлён',
-      JSON.stringify(scope.Module.arguments) === JSON.stringify(['-game', 'cstrike', '-dev', '3', '-takedmg']));
-    ok('resume: глобальная run() восстановлена', scope.run === saved);
-    let threw = false;
-    try { app.resumeEngineRun(scope, null, []); } catch (e) { threw = true; }
-    ok('resume: без savedRun — честная ошибка', threw);
+    /* авто-расчёт памяти под кэш в MEMFS */
+    ok('memory: авто = 256 МБ при пустом кэше', app.computeTotalMemoryMB(0, 0) === 256);
+    ok('memory: 150 МБ кэш → не меньше 448 МБ (запас ×1.5 + headroom)',
+      app.computeTotalMemoryMB(150 * 1024 * 1024, 0) >= 448);
+    ok('memory: выбор пользователя приоритетнее авто',
+      app.computeTotalMemoryMB(0, 768) === 768);
+    ok('memory: потолок 2048 МБ', app.computeTotalMemoryMB(2000 * 1024 * 1024, 0) === 2048);
+    ok('memory: объём выровнен по 64 МБ (страницы памяти)',
+      app.computeTotalMemoryMB(123 * 1024 * 1024, 0) % 64 === 0);
   }
 
-  /* ═══════════════ 6. МОНТИРОВАНИЕ В EMSCRIPTEN FS ═══════════════ */
+  /* ═══════════════ 6. МОНТИРОВАНИЕ В EMSCRIPTEN FS (/rodir) ═══════════════ */
   {
     const FS = mockFS();
     const created = app.setupEngineFS(FS, 'cstrike');
-    ok('fs: setupEngineFS создал /xash и /xash/cstrike',
-      FS._dirs.has('/xash') && FS._dirs.has('/xash/cstrike') && created === '/xash/cstrike');
-    ok('fs: базовый каталог /xash/valve создан (нужен движку)', FS._dirs.has('/xash/valve'));
-    ok('fs: рабочая директория движка — /xash', FS.cwd() === '/xash');
+    ok('fs: setupEngineFS создал /rodir и /rodir/cstrike',
+      FS._dirs.has('/rodir') && FS._dirs.has('/rodir/cstrike') && created === '/rodir/cstrike');
+    ok('fs: базовый каталог /rodir/valve создан (нужен движку — розовые артефакты)',
+      FS._dirs.has('/rodir/valve'));
+    ok('fs: рабочая директория движка — /rodir', FS.cwd() === '/rodir');
 
     const bytes = new Uint8Array([42, 43, 44, 250]);
-    app.mountFileToFS(FS, '/xash/cstrike/models/player/urban/urban.mdl', bytes);
-    const rec = FS._files.get('/xash/cstrike/models/player/urban/urban.mdl');
-    ok('fs: createDataFile записал байты в /xash/cstrike/…', !!rec && rec.data[3] === 250);
+    app.mountFileToFS(FS, '/rodir/cstrike/models/player/urban/urban.mdl', bytes);
+    const rec = FS._files.get('/rodir/cstrike/models/player/urban/urban.mdl');
+    ok('fs: createDataFile записал байты в /rodir/cstrike/…', !!rec && rec.data[3] === 250);
     ok('fs: подпапки созданы через FS.mkdir',
-      FS._dirs.has('/xash/cstrike/models') && FS._dirs.has('/xash/cstrike/models/player/urban'));
+      FS._dirs.has('/rodir/cstrike/models') && FS._dirs.has('/rodir/cstrike/models/player/urban'));
     const cdf = FS._calls.filter((c) => c[0] === 'createDataFile').pop();
     ok('fs: сигнатура createDataFile(parent, name, bytes, true, true, canOwn)',
-      cdf[1] === '/xash/cstrike/models/player/urban/urban.mdl' && cdf[3] === true && cdf[4] === true && cdf[5] === true,
+      cdf[1] === '/rodir/cstrike/models/player/urban/urban.mdl' && cdf[3] === true && cdf[4] === true && cdf[5] === true,
       JSON.stringify(cdf));
 
     /* перезапись того же пути (мод поверх оригинала) */
-    app.mountFileToFS(FS, '/xash/cstrike/models/player/urban/urban.mdl', new Uint8Array([1, 2]));
+    app.mountFileToFS(FS, '/rodir/cstrike/models/player/urban/urban.mdl', new Uint8Array([1, 2]));
     ok('fs: перезапись файла без конфликта (unlink + createDataFile)',
-      FS._files.get('/xash/cstrike/models/player/urban/urban.mdl').data.length === 2);
+      FS._files.get('/rodir/cstrike/models/player/urban/urban.mdl').data.length === 2);
 
     /* массовое монтирование набора */
     const FS2 = mockFS();
@@ -375,19 +431,19 @@ function mockFS() {
     const stat = app.mountFileSet(FS2, 'hl1', items, (p) => pcts.push(p));
     ok('mountFileSet: 4 файла записаны, размер посчитан',
       stat.count === 4 && stat.bytes === 1024 + 2048 + 512 + 256, JSON.stringify({ c: stat.count, b: stat.bytes }));
-    ok('mountFileSet: valve/… → /xash/valve/…, относительные → каталог игры',
-      FS2._files.has('/xash/valve/halflife.wad') && FS2._files.has('/xash/valve/maps/c1a0.bsp')
-      && FS2._files.has('/xash/valve/sound/ambience/wind.wav') && FS2._files.has('/xash/valve/gfx.wad'));
+    ok('mountFileSet: valve/… → /rodir/valve/…, относительные → каталог игры',
+      FS2._files.has('/rodir/valve/halflife.wad') && FS2._files.has('/rodir/valve/maps/c1a0.bsp')
+      && FS2._files.has('/rodir/valve/sound/ambience/wind.wav') && FS2._files.has('/rodir/valve/gfx.wad'));
     ok('mountFileSet: прогресс доходит до 100%', pcts[pcts.length - 1] === 100, JSON.stringify(pcts));
 
     /* liblist.gam мода, если в архиве мода его нет */
     const FS3 = mockFS();
     app.setupEngineFS(FS3, 'valve');
-    app.ensureFSDirectory(FS3, '/xash/theyhunger');
+    app.ensureFSDirectory(FS3, '/rodir/theyhunger');
     const madeLiblist = app.ensureModGameInfo(FS3, 'theyhunger', 'They Hunger');
     ok('ensureModGameInfo: создан liblist.gam для каталога мода',
-      madeLiblist === true && FS3._files.has('/xash/theyhunger/liblist.gam'));
-    const asText = new TextDecoder().decode(FS3._files.get('/xash/theyhunger/liblist.gam').data);
+      madeLiblist === true && FS3._files.has('/rodir/theyhunger/liblist.gam'));
+    const asText = new TextDecoder().decode(FS3._files.get('/rodir/theyhunger/liblist.gam').data);
     ok('ensureModGameInfo: внутри game/gamedir', /game "They Hunger"/.test(asText) && /gamedir "theyhunger"/.test(asText));
     ok('ensureModGameInfo: существующий liblist.gam не перезаписывается',
       app.ensureModGameInfo(FS3, 'theyhunger', 'They Hunger') === false);
@@ -395,39 +451,47 @@ function mockFS() {
       app.sanitizeDirName(' My Mod !! ') === 'mymod' && app.sanitizeDirName('!!!') === null);
   }
 
-  /* ═══════════════ 7. ПУТИ ФС И АРГУМЕНТЫ ЗАПУСКА ═══════════════ */
+  /* ═══════════════ 7. ПУТИ ФС (/rodir) И АРГУМЕНТЫ ЗАПУСКА ═══════════════ */
   {
-    ok('paths: Half-Life → /xash/valve/',
-      app.resolveFSAbsolutePath('hl1', 'valve/models/player.mdl') === '/xash/valve/models/player.mdl');
-    ok('paths: относительный путь Half-Life → /xash/valve/',
-      app.resolveFSAbsolutePath('hl1', 'sound/weapons/cbar_hit1.wav') === '/xash/valve/sound/weapons/cbar_hit1.wav');
-    ok('paths: CS 1.6 → /xash/cstrike/',
-      app.resolveFSAbsolutePath('cs16', 'cstrike/models/player/terror.mdl') === '/xash/cstrike/models/player/terror.mdl');
-    ok('paths: относительный путь CS 1.6 → /xash/cstrike/',
-      app.resolveFSAbsolutePath('cs16', 'maps/de_dust2.bsp') === '/xash/cstrike/maps/de_dust2.bsp');
-    ok('paths: базовая valve/ из CS-архива остаётся в /xash/valve/',
-      app.resolveFSAbsolutePath('cs16', 'valve/gfx.wad') === '/xash/valve/gfx.wad');
+    ok('paths: корень ФС движка = /rodir', app.ENGINE_ROOT === '/rodir');
+    ok('paths: Half-Life → /rodir/valve/',
+      app.resolveFSAbsolutePath('hl1', 'valve/models/player.mdl') === '/rodir/valve/models/player.mdl');
+    ok('paths: относительный путь Half-Life → /rodir/valve/',
+      app.resolveFSAbsolutePath('hl1', 'sound/weapons/cbar_hit1.wav') === '/rodir/valve/sound/weapons/cbar_hit1.wav');
+    ok('paths: CS 1.6 → /rodir/cstrike/',
+      app.resolveFSAbsolutePath('cs16', 'cstrike/models/player/terror.mdl') === '/rodir/cstrike/models/player/terror.mdl');
+    ok('paths: относительный путь CS 1.6 → /rodir/cstrike/',
+      app.resolveFSAbsolutePath('cs16', 'maps/de_dust2.bsp') === '/rodir/cstrike/maps/de_dust2.bsp');
+    ok('paths: базовая valve/ из CS-архива остаётся в /rodir/valve/',
+      app.resolveFSAbsolutePath('cs16', 'valve/gfx.wad') === '/rodir/valve/gfx.wad');
     ok('paths: обратные слэши и лидирующий / нормализуются',
-      app.resolveFSAbsolutePath('hl1', '\\valve\\gfx.wad') === '/xash/valve/gfx.wad'
-      && app.resolveFSAbsolutePath('hl1', '/models/a.mdl') === '/xash/valve/models/a.mdl');
+      app.resolveFSAbsolutePath('hl1', '\\valve\\gfx.wad') === '/rodir/valve/gfx.wad'
+      && app.resolveFSAbsolutePath('hl1', '/models/a.mdl') === '/rodir/valve/models/a.mdl');
     ok('gameDirFor: cstrike для CS и valve для HL/модов',
       app.gameDirFor('cs16') === 'cstrike' && app.gameDirFor('cs16mod') === 'cstrike'
       && app.gameDirFor('hl1') === 'valve' && app.gameDirFor('hl1mod') === 'valve');
 
-    ok('args: CS 1.6 → ["-game","cstrike","-dev","3","-takedmg"]',
-      JSON.stringify(app.getLaunchArguments('cs16')) === JSON.stringify(['-game', 'cstrike', '-dev', '3', '-takedmg']));
-    ok('args: Half-Life → ["-dev","3","-takedmg"]',
-      JSON.stringify(app.getLaunchArguments('hl1')) === JSON.stringify(['-dev', '3', '-takedmg']));
-    ok('args: мод → -game <каталог_мода>',
+    ok('args: CS 1.6 → строго ["-game","cstrike","+maxplayers","16"]',
+      JSON.stringify(app.getLaunchArguments('cs16')) === JSON.stringify(['-game', 'cstrike', '+maxplayers', '16']));
+    ok('args: Half-Life → [] (движок сам находит valve/)',
+      JSON.stringify(app.getLaunchArguments('hl1')) === JSON.stringify([]));
+    ok('args: мод CS → -game <каталог> +maxplayers 16',
+      JSON.stringify(app.getLaunchArguments('cs16mod', 'retake'))
+      === JSON.stringify(['-game', 'retake', '+maxplayers', '16']));
+    ok('args: мод HL → -game <каталог>',
       JSON.stringify(app.getLaunchArguments('hl1mod', 'theyhunger'))
-      === JSON.stringify(['-game', 'theyhunger', '-dev', '3', '-takedmg']));
-    const full = app.buildEngineArguments('cs16', null, { width: 1920, height: 1080 });
-    ok('args: боевой argv = базовые параметры + -width/-height окна движка',
-      full.slice(0, 5).join(' ') === '-game cstrike -dev 3 -takedmg'
-      && full.includes('-width') && full.includes('1920') && full.includes('-height') && full.includes('1080'),
-      JSON.stringify(full));
-    ok('args: минимальный размер окна ограничен',
-      app.buildEngineArguments('hl1', null, { width: 10, height: 0 }).join(' ').includes('-width 320'));
+      === JSON.stringify(['-game', 'theyhunger']));
+    ok('args: buildEngineArguments = строгий argv (окно движок сам по canvas)',
+      JSON.stringify(app.buildEngineArguments('cs16', null, { width: 1920, height: 1080 }))
+      === JSON.stringify(['-game', 'cstrike', '+maxplayers', '16'])
+      && !app.buildEngineArguments('cs16').includes('-width'));
+
+    /* ENV движка: XASH3D_BASEDIR / XASH3D_GAMEDIR */
+    const envM = { ENV: null };
+    ok('env: applyEngineEnv выставляет XASH3D_BASEDIR=/rodir и XASH3D_GAMEDIR',
+      app.applyEngineEnv(envM, { baseDir: app.ENGINE_ROOT, gameDir: 'cstrike' }) === true
+      && envM.ENV.XASH3D_BASEDIR === '/rodir' && envM.ENV.XASH3D_GAMEDIR === 'cstrike');
+    ok('env: applyEngineEnv(null) — без краха', app.applyEngineEnv(null) === false);
   }
 
   /* ═══════════════ 8. ЖЁСТКИЙ LINUX-ФИКС ИНПУТОВ ═══════════════ */
@@ -450,7 +514,26 @@ function mockFS() {
       /Распаковка\$\{suffix\}: |Распаковка: /.test(srcApp));
   }
 
-  /* ═══════════════ 9. ИНТЕГРАЦИЯ В index.html / dev-сервер ═══════════════ */
+  /* ═══════════════ 9. МЫШЬ: СВОБОДНА В МЕНЮ, ЗАХВАТ В ИГРЕ ═══════════════ */
+  {
+    const srcApp = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+    ok('mouse: флаг активности матча (isGameActive) в перехватчике',
+      /let isGameActive = false/.test(srcApp)
+      && /if \(!isGameActive \|\| document\.pointerLockElement === canvasEl\) return;/.test(srcApp));
+    ok('mouse: авто Pointer Lock при старте сессии отключён',
+      !/setTimeout\([\s\S]{0,120}requestPointerLock/.test(srcApp));
+    ok('mouse: курсор свободен и виден (canvas.style.cursor = "default")',
+      /style\.cursor\s*=\s*['"]default['"]/.test(srcApp) && /setFreeCursor/.test(srcApp));
+    ok('mouse: Escape / ` — немедленно освобождают курсор',
+      /e\.code === 'Escape' \|\| e\.key === '`'/.test(srcApp)
+      && /document\.exitPointerLock\(\)/.test(srcApp));
+    ok('mouse: в меню движка (cursor=default) клик не крадёт мышь',
+      /canvasEl\.style\.cursor !== 'none'\) \{ mouseWantsLock = false; return; \}/.test(srcApp));
+    ok('mouse: в игре (cursor=none) клик возвращает захват',
+      /mouseWantsLock = true;\s*tryLockPointer\(\)/.test(srcApp));
+  }
+
+  /* ═══════════════ 10. ИНТЕГРАЦИЯ В index.html / dev-сервер ═══════════════ */
   {
     const srcHtml = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
     ok('html: canvas#canvas единственный и передаётся движку', /<canvas id="canvas"/.test(srcHtml));
@@ -461,17 +544,20 @@ function mockFS() {
     const srcApp = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
     ok('app: ядро грузится динамически через <script> в порядке цепочки',
       /loadScript\(src\)/.test(srcApp) && /ENGINE_SCRIPTS/.test(srcApp));
-    ok('app: Module.memoryInitializerRequest заполняется XHR /xash.html.mem',
-      /memoryInitializerRequest\s*=\s*xhr/.test(srcApp) && /ENGINE_MEMORY_INITIALIZER/.test(srcApp));
+    ok('app: контролируемый memoryInitializerRequest (XHR /xash.html.mem → release)',
+      /memoryInitializerRequest\s*=\s*createControlledMemoryRequest/.test(srcApp)
+      && /fetchMemoryInitializer/.test(srcApp) && /releaseMemoryRequest\(/.test(srcApp));
     ok('app: Module.canvas = document.getElementById(\'canvas\')',
-      /getElementById\('canvas'\)/.test(srcApp) && /Module\.canvas\s*=\s*canvasEl/.test(srcApp));
+      /getElementById\('canvas'\)/.test(srcApp) && /window\.Module\.canvas\s*=\s*canvasEl/.test(srcApp));
     ok('app: ENV.XASH3D_BASEDIR / XASH3D_GAMEDIR выставляются перед main()',
-      /XASH3D_BASEDIR/.test(srcApp) && /XASH3D_GAMEDIR/.test(srcApp));
+      /XASH3D_BASEDIR/.test(srcApp) && /XASH3D_GAMEDIR/.test(srcApp) && /applyEngineEnv\(/.test(srcApp));
+    ok('app: контроль целостности ядра (__ATINIT__) перед DSO',
+      /__ATINIT__/.test(srcApp) && /assertEngineGlobals/.test(srcApp));
     const dev = fs.readFileSync(path.join(ROOT, 'dev-server.js'), 'utf8');
     ok('dev-server: COOP/COEP и MIME для .mem/.wasm', /Cross-Origin-Embedder-Policy/.test(dev) && /\.mem/.test(dev));
   }
 
-  /* ═══════════════ 10. БОЕВОЙ СМОК НАСТОЯЩЕГО /xash.js ═══════════════ */
+  /* ═══════════════ 11. БОЕВОЙ СМОК НАСТОЯЩЕГО /xash.js ═══════════════ */
   if (!process.env.SKIP_REAL_ENGINE) {
     try {
       const { spawnSync } = require('child_process');
@@ -482,16 +568,22 @@ function mockFS() {
       const tail = out.split('\n').filter((l) => l.trim()).slice(-14);
       ok('real-engine: смоук настоящего ядра прошёл (main() исполняется)',
         r.status === 0, tail.join(' | '));
+      ok('real-engine: main() в standby до отдачи памяти (нет авто-старта)',
+        /Module\.calledRun = false/.test(out), tail.join(' | '));
       ok('real-engine: напечатан баннер Xash3D FWGS',
         /Xash3D FWGS .*started/.test(out), tail.join(' | '));
-      ok('real-engine: движок принял /xash рабочей директорией',
-        /\/xash is working directory now/.test(out));
-      ok('real-engine: движок прочитал смонтированный valve/liblist.gam',
-        /valve\/liblist\.gam/.test(out));
+      ok('real-engine: движок принял /rodir рабочей директорией',
+        /\/rodir is working directory now/.test(out));
+      ok('real-engine: движок загрузил cstrike (CS 1.6) и иерархию valve',
+        /FS_LoadGameInfo\( cstrike \)/.test(out) && /FS_AddGameHierarchy/.test(out));
+      ok('real-engine: /rodir/cstrike смонтирован побайтово (путь Counter-Strike 1.6)',
+        /\[PASS\] FS: \/rodir\/cstrike смонтирован/.test(out));
+      ok('real-engine: /rodir/valve смонтирован (halflife.wad/gfx.wad)',
+        /\[PASS\] FS: \/rodir\/valve смонтирован/.test(out));
       ok('real-engine: server.js/client.js/menu.js зарегистрированы в DLFCN',
         /Module server loaded as/.test(out) && /Module client loaded as/.test(out) && /Module menu loaded as/.test(out));
       ok('real-engine: побайтовый round-trip в настоящей MEMFS',
-        /FS: побайтовый round-trip/.test(out) ? /\[PASS\] FS: побайтовый round-trip/.test(out) : /round-trip/.test(out));
+        /round-trip/.test(out));
     } catch (e) {
       ok('real-engine: смоук', false, e.message);
     }

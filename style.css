@@ -853,7 +853,9 @@ body.extra-open .more-plus { transform: rotate(45deg); }
   position: absolute; inset: 0;
   width: 100%; height: 100%;
   display: block; outline: none;
-  cursor: crosshair;
+  /* в меню — свободный системный курсор (Pointer Lock не включается
+     автоматически); в игре движок сам прячет курсор (style.cursor='none') */
+  cursor: default;
 }
 
 .game-hud {
